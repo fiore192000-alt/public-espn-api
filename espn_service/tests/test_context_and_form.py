@@ -309,3 +309,70 @@ class TestHalfLifeTuning:
         call_command("tune_model", "demo.1", half_lives="60", refit_every=10, stdout=out)
 
         assert "No matches had enough history" in out.getvalue()
+
+
+@pytest.mark.django_db
+class TestProjectionSource:
+    def test_uses_the_scoreline_model_when_history_allows(self):
+        call_command("seed_demo_data", rounds=20, upcoming=2, stdout=StringIO())
+        event = Event.objects.filter(status=Event.STATUS_SCHEDULED).order_by("date").first()
+
+        projection = analyze_event(event)["projection"]
+
+        assert projection["source"] == "dixon_coles"
+        assert projection["model"]["matches"] > 0
+
+    def test_agrees_with_the_forecast_endpoint(self):
+        from apps.espn import forecast
+
+        call_command("seed_demo_data", rounds=20, upcoming=2, stdout=StringIO())
+        event = Event.objects.filter(status=Event.STATUS_SCHEDULED).order_by("date").first()
+
+        analysed = analyze_event(event)["projection"]["probabilities"]
+        forecast_markets = forecast.forecast_event(event)["markets"]["1x2"]
+
+        assert analysed["home_win"] == pytest.approx(
+            forecast_markets["home"]["probability"], abs=1e-3
+        )
+        assert analysed["draw"] == pytest.approx(forecast_markets["draw"]["probability"], abs=1e-3)
+        assert analysed["away_win"] == pytest.approx(
+            forecast_markets["away"]["probability"], abs=1e-3
+        )
+
+    def test_draw_probability_varies_between_fixtures(self):
+        call_command("seed_demo_data", rounds=30, upcoming=4, stdout=StringIO())
+        events = Event.objects.filter(status=Event.STATUS_SCHEDULED).order_by("date")[:4]
+
+        draws = {analyze_event(event)["projection"]["probabilities"]["draw"] for event in events}
+
+        # The old form projection priced every fixture in a league identically.
+        assert len(draws) > 1
+
+    def test_falls_back_and_says_so_without_enough_history(self, schedule):
+        payload = analyze_event(schedule["upcoming"])
+
+        assert payload["projection"]["source"] == "fallback_form"
+        assert "model" not in payload["projection"]
+        assert any("fallback" in note for note in payload["insights"])
+
+    def test_probabilities_still_sum_to_one_on_both_paths(self, schedule):
+        fallback = analyze_event(schedule["upcoming"])["projection"]["probabilities"]
+        assert sum(fallback.values()) == pytest.approx(1.0)
+
+        call_command("seed_demo_data", rounds=20, upcoming=2, stdout=StringIO())
+        event = Event.objects.filter(league__slug="demo.1", status=Event.STATUS_SCHEDULED).first()
+        modelled = analyze_event(event)["projection"]["probabilities"]
+        assert sum(modelled.values()) == pytest.approx(1.0)
+
+    def test_confidence_follows_the_model_when_it_is_used(self):
+        call_command("seed_demo_data", rounds=30, upcoming=2, stdout=StringIO())
+        event = Event.objects.filter(status=Event.STATUS_SCHEDULED).order_by("date").first()
+
+        payload = analyze_event(event)
+        assert payload["projection"]["source"] == "dixon_coles"
+        assert payload["confidence"] in {"medium", "high"}
+
+    def test_fallback_confidence_is_capped(self, schedule):
+        payload = analyze_event(schedule["upcoming"])
+        assert payload["projection"]["source"] == "fallback_form"
+        assert payload["confidence"] in {"none", "low", "medium"}

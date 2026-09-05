@@ -102,7 +102,7 @@ The analysis payload contains:
 | `home` / `away` | Team, current score, `form`, `context` and weighted absences |
 | `head_to_head` | Previous meetings, wins per side, combined points per game |
 | `league_baseline` | League scoring level, empirical home advantage, margin spread, draw rate |
-| `projection` | Expected score per side, margin, and `home_win` / `draw` / `away_win` probabilities |
+| `projection` | Expected score per side, margin, `home_win` / `draw` / `away_win` probabilities, and the `source` that produced them |
 | `confidence` | `none` / `low` / `medium` / `high`, from the available sample size |
 | `insights` | Plain-language notes summarising the above |
 
@@ -127,11 +127,23 @@ been validated against real results yet, and an unvalidated adjustment makes a m
 worse while looking more sophisticated. Wire one in only after the backtest says it
 helps.
 
-Projected scores blend each side's scoring rate with the opponent's concession rate,
-using home/away splits once they hold at least three games and falling back to the
-overall record otherwise. Win probabilities come from the projected margin against the
-league's own margin spread, with the draw share taken from the league's observed draw rate
-— so leagues without draws simply get zero.
+#### Where the projection comes from
+
+`projection.source` says which method produced the numbers:
+
+| Source | When | Draw probability |
+|--------|------|------------------|
+| `dixon_coles` | Default, whenever the league has enough history to fit | Derived per fixture from the scoreline distribution |
+| `fallback_form` | Only when the league has fewer than 20 completed matches | The league's observed draw rate — **the same constant for every fixture** |
+
+The model path is the same fit that backs `/forecast/`, so the two endpoints agree
+rather than offering contradictory probabilities for one match. When the fallback is
+used, `insights` says so explicitly.
+
+The fallback blends each side's scoring rate with the opponent's concession rate, using
+home/away splits once they hold at least three games. It cannot tell a tight match from
+a mismatch as far as the draw is concerned, which is exactly why it is a fallback: with
+20 matches stored the model takes over.
 
 ```bash
 curl "http://localhost:8000/api/v1/events/44/analysis/?lookback=10"

@@ -34,6 +34,11 @@ MOMENTUM_WINDOW = 5
 # Football scoring; used only for the points-per-game summaries.
 POINTS_FOR_RESULT = {RESULT_WIN: 3.0, RESULT_DRAW: 1.0, RESULT_LOSS: 0.0}
 
+# Which method produced a projection. The scoreline model is the default; the
+# form-based fallback only appears when the league has too little history to fit.
+PROJECTION_MODEL = "dixon_coles"
+PROJECTION_FALLBACK = "fallback_form"
+
 
 class AnalysisNotAvailable(Exception):
     """Raised when an event cannot be analysed (e.g. it is not a two-sided match)."""
@@ -601,12 +606,28 @@ def _probabilities(margin: float, baseline: LeagueBaseline) -> dict[str, float]:
     return rounded
 
 
-def _confidence(home_form: TeamForm, away_form: TeamForm, baseline: LeagueBaseline) -> str:
+def _confidence(
+    home_form: TeamForm,
+    away_form: TeamForm,
+    baseline: LeagueBaseline,
+    projection: dict[str, Any] | None = None,
+) -> str:
+    """How much the projection rests on, rather than how strong it looks.
+
+    A model-backed projection is judged on whether the fit itself is reliable;
+    the fallback is judged on form sample alone and is capped at "medium",
+    because a constant league-wide draw rate is not a per-fixture estimate however
+    many games back it.
+    """
+    if projection and projection.get("source") == PROJECTION_MODEL:
+        model = projection.get("model") or {}
+        if model.get("reliable"):
+            return "high"
+        return "medium" if model.get("converged") else "low"
+
     games = min(home_form.overall.played, away_form.overall.played)
     if games == 0 or baseline.sample == 0:
         return "none"
-    if games >= 8 and baseline.sample >= 40:
-        return "high"
     if games >= 4:
         return "medium"
     return "low"
@@ -689,7 +710,100 @@ def _insights(
         f"Model leans {favourite} by {abs(margin)} "
         f"({projection['home_score']} - {projection['away_score']} projected)."
     )
+
+    if projection.get("source") == PROJECTION_FALLBACK:
+        notes.append(
+            "Too little league history to fit the scoreline model, so this projection "
+            "comes from the form fallback, which prices every draw in the league at the "
+            "same rate. Use /forecast/ once more matches are stored."
+        )
     return notes
+
+
+def _normalise(probabilities: dict[str, float]) -> dict[str, float]:
+    """Round to four places and put the rounding drift on the likeliest outcome."""
+    rounded = {key: round(value, 4) for key, value in probabilities.items()}
+    leader = max(rounded, key=lambda key: rounded[key])
+    rounded[leader] = round(rounded[leader] + (1 - sum(rounded.values())), 4)
+    return rounded
+
+
+def _model_projection(
+    event: Event,
+    home_comp: Competitor,
+    away_comp: Competitor,
+) -> dict[str, Any] | None:
+    """Projection from the Dixon-Coles fit, or None when it cannot be fitted.
+
+    This is the same model that backs ``/forecast/``, so the two endpoints agree
+    rather than offering contradictory probabilities for the same fixture.
+    """
+    # Imported here rather than at module level: forecast.py pulls helpers out of
+    # this module, so a top-level import would be circular.
+    from apps.espn import markets
+    from apps.espn.dixon_coles import NotEnoughData, score_grid
+    from apps.espn.forecast import fit_league_model
+
+    try:
+        model = fit_league_model(event.league, before=event.date)
+        grid = score_grid(model, home_comp.team_id, away_comp.team_id)
+    except NotEnoughData:
+        return None
+
+    outcomes = markets.match_odds(grid)
+    return {
+        "source": PROJECTION_MODEL,
+        "home_score": round(grid.expected_home_goals, 2),
+        "away_score": round(grid.expected_away_goals, 2),
+        "total": round(grid.expected_home_goals + grid.expected_away_goals, 2),
+        "margin": round(grid.expected_home_goals - grid.expected_away_goals, 2),
+        "probabilities": _normalise(
+            {
+                "home_win": outcomes[markets.SELECTION_HOME],
+                "draw": outcomes[markets.SELECTION_DRAW],
+                "away_win": outcomes[markets.SELECTION_AWAY],
+            }
+        ),
+        "model": model.to_dict(),
+    }
+
+
+def _form_projection(
+    home_form: TeamForm,
+    away_form: TeamForm,
+    baseline: LeagueBaseline,
+) -> dict[str, Any]:
+    """Fallback used only when there is too little history to fit the model.
+
+    It blends scoring and concession rates and prices the draw at the league's
+    observed draw rate — a single constant for every fixture in the league. That
+    is why it is a fallback and not the default: it cannot tell a tight match
+    from a mismatch as far as the draw is concerned.
+    """
+    expected_home = _expected_score(
+        home_form.home, home_form.overall, away_form.away, away_form.overall
+    )
+    expected_away = _expected_score(
+        away_form.away, away_form.overall, home_form.home, home_form.overall
+    )
+
+    # When splits are too thin to carry it, add the league's home edge explicitly.
+    if home_form.home.played < MIN_SPLIT_SAMPLE or away_form.away.played < MIN_SPLIT_SAMPLE:
+        expected_home += baseline.home_advantage / 2
+        expected_away -= baseline.home_advantage / 2
+
+    expected_home = max(expected_home, 0.0)
+    expected_away = max(expected_away, 0.0)
+    margin = round(expected_home - expected_away, 2)
+
+    return {
+        "source": PROJECTION_FALLBACK,
+        "home_score": round(expected_home, 2),
+        "away_score": round(expected_away, 2),
+        "total": round(expected_home + expected_away, 2),
+        "margin": margin,
+        "probabilities": _probabilities(margin, baseline),
+    }
 
 
 def analyze_event(
@@ -715,29 +829,9 @@ def analyze_event(
     home_context = build_context(event, home_comp)
     away_context = build_context(event, away_comp)
 
-    expected_home = _expected_score(
-        home_form.home, home_form.overall, away_form.away, away_form.overall
+    projection = _model_projection(event, home_comp, away_comp) or _form_projection(
+        home_form, away_form, baseline
     )
-    expected_away = _expected_score(
-        away_form.away, away_form.overall, home_form.home, home_form.overall
-    )
-
-    # When splits are too thin to carry it, add the league's home edge explicitly.
-    if home_form.home.played < MIN_SPLIT_SAMPLE or away_form.away.played < MIN_SPLIT_SAMPLE:
-        expected_home += baseline.home_advantage / 2
-        expected_away -= baseline.home_advantage / 2
-
-    expected_home = max(expected_home, 0.0)
-    expected_away = max(expected_away, 0.0)
-    margin = round(expected_home - expected_away, 2)
-
-    projection = {
-        "home_score": round(expected_home, 2),
-        "away_score": round(expected_away, 2),
-        "total": round(expected_home + expected_away, 2),
-        "margin": margin,
-        "probabilities": _probabilities(margin, baseline),
-    }
 
     return {
         "event": {
@@ -781,7 +875,7 @@ def analyze_event(
         "head_to_head": h2h.to_dict(),
         "league_baseline": baseline.to_dict(),
         "projection": projection,
-        "confidence": _confidence(home_form, away_form, baseline),
+        "confidence": _confidence(home_form, away_form, baseline, projection),
         "insights": _insights(
             home_team,
             away_team,
