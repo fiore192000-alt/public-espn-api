@@ -11,9 +11,9 @@ can be measured against real results and, more importantly, against real prices.
 Source: https://github.com/xgabora/Club-Football-Match-Data-2000-2025
         (results and odds from https://www.football-data.co.uk/)
 
-The odds columns are the market's pre-match average and maximum. They are *not*
-Pinnacle closing prices, so they support a market benchmark but not a true
-closing-line-value calculation.
+The odds columns are Bet365's pre-match price and the best price across roughly
+seventeen European bookmakers. They are *not* closing prices, so they support a
+market benchmark but not a closing-line-value calculation.
 """
 
 import argparse
@@ -55,10 +55,14 @@ DIVISIONS = {
     "G1": ("soccer", "gre.1", "Greek Super League", "GRESL"),
 }
 
-# Bookmaker aggregates published per match. Stored as two "providers" so the
-# value engine can devig each consistently.
-PROVIDER_AVERAGE = ("fd-avg", "Market average")
-PROVIDER_MAXIMUM = ("fd-max", "Market maximum")
+# Two price series per match. The first is one bookmaker's own quote; the second
+# is the best price available anywhere, which is not a coherent book and must never
+# be devigged as if it were — its overround sits near or below 1.
+#
+# Bet365 is a real book with a real margin, so it is the one the market benchmark
+# uses. Calling it a "market average" would overstate what it represents.
+PROVIDER_BET365 = ("fd-b365", "Bet365")
+PROVIDER_MAXIMUM = ("fd-max", "Best of ~17 bookmakers")
 
 TOTALS_LINE = "2.5"
 
@@ -143,7 +147,7 @@ class Command(BaseCommand):
             )
         )
         self.stdout.write(
-            "Odds are the market's pre-match average and maximum, not closing prices."
+            "Odds are Bet365's pre-match price and the best of ~17 books, not closing prices."
         )
 
     def _read(
@@ -262,7 +266,7 @@ class Command(BaseCommand):
         written = 0
         for provider_id, provider_name, columns in (
             (
-                *PROVIDER_AVERAGE,
+                *PROVIDER_BET365,
                 {
                     (MARKET_MATCH_ODDS, SELECTION_HOME, ""): "OddHome",
                     (MARKET_MATCH_ODDS, SELECTION_DRAW, ""): "OddDraw",

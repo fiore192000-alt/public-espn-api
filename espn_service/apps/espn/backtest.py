@@ -349,9 +349,9 @@ def _calibration(records: list[ForecastRecord], source: str = "probabilities") -
 
 
 # Devigging a "best price across bookmakers" line is meaningless — its overround
-# is near or below 1, so it would read as a permanent edge. The consensus average
-# is the honest representation of what the market thinks.
-MARKET_BENCHMARK_PROVIDERS = ("fd-avg",)
+# is near or below 1, so it would read as a permanent edge. A single book's own
+# quote is a coherent market with a real margin, so that is what gets devigged.
+MARKET_BENCHMARK_PROVIDERS = ("fd-b365",)
 
 
 def _market_probabilities(prices: list[PricedSelection]) -> dict[str, float] | None:

@@ -217,7 +217,7 @@ python manage.py ingest_football_data Matches.csv --division I1 --date-from 2015
 Division codes map onto ESPN-style league slugs (`I1` → `ita.1`, `E0` → `eng.1`,
 `SP1` → `esp.1`, …), so a league loaded this way sits alongside anything ingested
 from ESPN and works with every command above. Odds are stored as two providers:
-`fd-avg` (market average) and `fd-max` (best price across bookmakers).
+`fd-b365` (Bet365's own price) and `fd-max` (best price across ~17 books).
 
 The dataset is **not** committed to this repository — download it separately. Note
 that these are pre-match average and maximum prices, **not** closing odds.
@@ -347,6 +347,57 @@ the pool wants to sharpen the price and subtract the models, not blend them in.
 
 Under the promotion rule, neither model is eligible for a betting decision. That is
 the correct outcome, and the reason the rule exists.
+
+### Removing the bookmaker's margin
+
+A quoted book always implies more than 100%. Recovering what it actually believes
+means deciding *how* that excess sits across the selections — and the choice is not
+cosmetic: it moves a longshot's implied probability far more than a favourite's,
+which is exactly where a model tends to disagree with the price.
+
+```bash
+python manage.py measure_devig ita.1
+```
+
+Three methods, scored against real results rather than assumed:
+
+| method | log loss | Brier |
+|---|---|---|
+| power | **0.9456** | **0.5603** |
+| Shin | 0.9459 | 0.5605 |
+| proportional | 0.9470 | 0.5611 |
+
+*(Bet365's 1X2 book, 3,799 Serie A matches.)*
+
+Paired tests settle it: proportional is worse than both by a distinguishable margin
+(t = −3.6 against Shin, −3.2 against power), while **Shin and power cannot be told
+apart** (t = −1.9). The default is Shin — it wins the tie on grounds the data cannot
+settle, by modelling *why* the margin sits where it does rather than fitting an
+exponent that makes the book add up.
+
+Switching off proportional makes the market benchmark **sharper**, which is the
+honest direction: the wall the models have to clear gets higher, not lower.
+
+### What the market's structure actually says
+
+The same command reports the microstructure, and this is the most useful number in
+the project so far:
+
+| | |
+|---|---|
+| Bet365 overround | 1.0490 (**4.67%** margin) |
+| Best price across ~17 books | **1.0003** |
+| Best price vs Bet365, best leg | **+9.82%** |
+
+Taking the best available price across bookmakers removes **almost the entire
+margin** — the best-of-17 book is very nearly margin-free — and it requires
+predicting nothing at all.
+
+On this data that is a larger and far more reliable effect than any model edge
+measured so far. Every model tested has failed to beat one bookmaker's pre-match
+line, while price selection alone is worth roughly 9.8% on the best leg of a
+three-way book. **Where the money is here is in the price you take, not in the
+outcome you forecast.**
 
 #### Honest limits
 

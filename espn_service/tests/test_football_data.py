@@ -116,7 +116,7 @@ class TestFootballDataLoader:
         event = Event.objects.get()
         average = {
             o.selection: o.decimal_odds
-            for o in event.odds.filter(provider_espn_id="fd-avg", market="1x2")
+            for o in event.odds.filter(provider_espn_id="fd-b365", market="1x2")
         }
         maximum = {
             o.selection: o.decimal_odds
@@ -182,7 +182,7 @@ class TestFootballDataLoader:
 
     def test_unusable_prices_are_dropped(self, csv_file):
         load(csv_file([row(odds=("0.5", "", "abc"))]), division="I1")
-        assert not Odds.objects.filter(provider_espn_id="fd-avg", market="1x2").exists()
+        assert not Odds.objects.filter(provider_espn_id="fd-b365", market="1x2").exists()
 
     def test_unknown_division_gets_a_generated_slug(self, csv_file):
         load(csv_file([row(division="ZZ9")]), division="ZZ9")
@@ -204,9 +204,9 @@ class TestFootballDataLoader:
 class TestMarketProbabilities:
     def test_devigs_the_average_provider(self):
         prices = [
-            PricedSelection("1x2", "home", "", 2.0, "fd-avg"),
-            PricedSelection("1x2", "draw", "", 4.0, "fd-avg"),
-            PricedSelection("1x2", "away", "", 4.0, "fd-avg"),
+            PricedSelection("1x2", "home", "", 2.0, "fd-b365"),
+            PricedSelection("1x2", "draw", "", 4.0, "fd-b365"),
+            PricedSelection("1x2", "away", "", 4.0, "fd-b365"),
         ]
         probabilities = _market_probabilities(prices)
 
@@ -215,9 +215,9 @@ class TestMarketProbabilities:
 
     def test_prefers_the_average_over_the_maximum(self):
         prices = [
-            PricedSelection("1x2", "home", "", 2.0, "fd-avg"),
-            PricedSelection("1x2", "draw", "", 4.0, "fd-avg"),
-            PricedSelection("1x2", "away", "", 4.0, "fd-avg"),
+            PricedSelection("1x2", "home", "", 2.0, "fd-b365"),
+            PricedSelection("1x2", "draw", "", 4.0, "fd-b365"),
+            PricedSelection("1x2", "away", "", 4.0, "fd-b365"),
             PricedSelection("1x2", "home", "", 2.6, "fd-max"),
             PricedSelection("1x2", "draw", "", 4.4, "fd-max"),
             PricedSelection("1x2", "away", "", 4.4, "fd-max"),
@@ -227,15 +227,15 @@ class TestMarketProbabilities:
 
     def test_incomplete_market_is_ignored(self):
         prices = [
-            PricedSelection("1x2", "home", "", 2.0, "fd-avg"),
-            PricedSelection("1x2", "draw", "", 4.0, "fd-avg"),
+            PricedSelection("1x2", "home", "", 2.0, "fd-b365"),
+            PricedSelection("1x2", "draw", "", 4.0, "fd-b365"),
         ]
         assert _market_probabilities(prices) is None
 
     def test_totals_do_not_stand_in_for_match_odds(self):
         prices = [
-            PricedSelection("totals", "over", "2.5", 1.9, "fd-avg"),
-            PricedSelection("totals", "under", "2.5", 1.9, "fd-avg"),
+            PricedSelection("totals", "over", "2.5", 1.9, "fd-b365"),
+            PricedSelection("totals", "under", "2.5", 1.9, "fd-b365"),
         ]
         assert _market_probabilities(prices) is None
 
