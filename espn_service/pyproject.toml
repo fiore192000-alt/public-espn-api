@@ -95,7 +95,7 @@ ignore = [
     "ARG002",  # pytest fixtures must match by name even if unused
     "B017",    # blind Exception catch is acceptable in test integrity checks
 ]
-"apps/ingest/management/commands/*" = [
+"apps/*/management/commands/*" = [
     "ARG002",  # Django management command handle() signature is fixed
 ]
 
