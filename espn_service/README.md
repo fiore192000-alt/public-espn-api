@@ -99,12 +99,33 @@ The analysis payload contains:
 
 | Section | Contents |
 |---------|----------|
-| `home` / `away` | Team, current score, `form` (W-D-L, scoring rates, home/away splits, streak, game log) and open injuries |
+| `home` / `away` | Team, current score, `form`, `context` and weighted absences |
 | `head_to_head` | Previous meetings, wins per side, combined points per game |
 | `league_baseline` | League scoring level, empirical home advantage, margin spread, draw rate |
 | `projection` | Expected score per side, margin, and `home_win` / `draw` / `away_win` probabilities |
 | `confidence` | `none` / `low` / `medium` / `high`, from the available sample size |
 | `insights` | Plain-language notes summarising the above |
+
+Each side's `form` carries, beyond the plain record:
+
+| Field | Meaning |
+|-------|---------|
+| `weighted` | Points and goals per game with older matches discounted (60-day half-life) |
+| `momentum` | The last 5 games against the side's own window average — `points_delta` above zero means it has been picking up more than usual lately |
+| `opponent_strength` | Mean goal difference per game of the opponents actually faced, so a good run against weak sides reads as one |
+
+And `context` carries the situational picture:
+
+| Field | Meaning |
+|-------|---------|
+| `rest_days` | Days since that side's previous completed match |
+| `matches_in_last_14_days` / `congested` | Fixture pile-up |
+| `injuries` | Absences weighted by status severity **and**, where season appearances are stored, by how much the player actually plays. `importance_known` says whether that playing-time weighting was available — ESPN's injury feed does not mark starters, so without stored stats every absence counts the same |
+
+**None of these feed the projection.** They are reported next to it, because none has
+been validated against real results yet, and an unvalidated adjustment makes a model
+worse while looking more sophisticated. Wire one in only after the backtest says it
+helps.
 
 Projected scores blend each side's scoring rate with the opponent's concession rate,
 using home/away splits once they hold at least three games and falling back to the
@@ -175,6 +196,23 @@ ESPN endpoint**, so expect to adjust it on first real contact.
 python manage.py backtest_model ita.1 --refit-every 5
 python manage.py backtest_model ita.1 --edge 0.08 --kelly 0.25 --json
 ```
+
+#### Choosing the half-life from the data
+
+The decay half-life decides how fast old matches stop counting — that is, how quickly
+the league turns over. Guessing it is guessing that. `tune_model` runs the same
+walk-forward backtest at each candidate and ranks them by out-of-sample log-loss:
+
+```bash
+python manage.py tune_model ita.1 --half-lives 30,60,90,120,180,365 --refit-every 5
+```
+
+Every candidate scores the same matches, so the numbers are comparable. The command
+also reports the spread across candidates and says so when they are too close to
+separate — on a few hundred matches, neighbouring half-lives usually differ by noise,
+and picking the winner then means tuning to noise. It also warns when even the best
+candidate fails to beat the base-rate reference, which means the model is not yet
+adding skill on that data at any setting.
 
 The model is refitted for every match on only the matches that finished before it,
 so no result informs its own prediction. The report separates two questions:

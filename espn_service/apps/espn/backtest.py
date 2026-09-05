@@ -408,3 +408,49 @@ def run(
             report.ledger.record(bet.stake_fraction, bet.decimal_odds, won)
 
     return report
+
+
+def sweep_half_life(
+    league: League,
+    half_lives: list[float],
+    *,
+    refit_every: int = 5,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> list[dict]:
+    """Score the model at several decay half-lives and rank them.
+
+    The half-life decides how fast old matches stop counting, and guessing it is
+    guessing how quickly the league turns over. This runs the same walk-forward
+    backtest at each candidate and ranks by out-of-sample log-loss, so the value
+    comes from the league's own history.
+
+    Every run scores the same matches, so the numbers are directly comparable.
+    Beware of reading too much into small gaps: with a few hundred matches the
+    difference between neighbouring half-lives is often noise, which is why the
+    spread across all candidates is reported alongside the winner.
+    """
+    results = []
+    for half_life in half_lives:
+        report = run(
+            league,
+            half_life_days=half_life,
+            refit_every=refit_every,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        scores = _scores(report.forecasts)
+        results.append(
+            {
+                "half_life_days": half_life,
+                "forecasts": len(report.forecasts),
+                "log_loss": scores["log_loss"],
+                "brier": scores["brier"],
+                "accuracy": _accuracy(report.forecasts),
+                "baseline_log_loss": _baseline_scores(report.forecasts)["log_loss"],
+            }
+        )
+
+    scored = [row for row in results if row["log_loss"] is not None]
+    scored.sort(key=lambda row: row["log_loss"])
+    return scored + [row for row in results if row["log_loss"] is None]

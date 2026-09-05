@@ -9,12 +9,13 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from django.db.models import Prefetch
 
-from apps.espn.models import Competitor, Event, Injury, League, Team
+from apps.espn.context import build_context
+from apps.espn.models import Competitor, Event, League, Team
 
 DEFAULT_LOOKBACK = 10
 MIN_SPLIT_SAMPLE = 3
@@ -23,6 +24,15 @@ FALLBACK_MARGIN_SIGMA = 10.0
 RESULT_WIN = "win"
 RESULT_DRAW = "draw"
 RESULT_LOSS = "loss"
+
+# Form is also reported with recent matches counted more heavily. This is shorter
+# than the scoreline model's half-life on purpose: form is meant to describe the
+# current run, where the model wants a stable long-run rating.
+FORM_HALF_LIFE_DAYS = 60.0
+# How many of the most recent games "momentum" compares against the full window.
+MOMENTUM_WINDOW = 5
+# Football scoring; used only for the points-per-game summaries.
+POINTS_FOR_RESULT = {RESULT_WIN: 3.0, RESULT_DRAW: 1.0, RESULT_LOSS: 0.0}
 
 
 class AnalysisNotAvailable(Exception):
@@ -108,6 +118,57 @@ class SplitRecord:
 
 
 @dataclass
+class WeightedForm:
+    """Form with recent matches counted more heavily than old ones."""
+
+    half_life_days: float = FORM_HALF_LIFE_DAYS
+    effective_games: float = 0.0
+    points_per_game: float = 0.0
+    scored_per_game: float = 0.0
+    conceded_per_game: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "half_life_days": self.half_life_days,
+            "effective_games": round(self.effective_games, 2),
+            "points_per_game": round(self.points_per_game, 3),
+            "scored_per_game": round(self.scored_per_game, 3),
+            "conceded_per_game": round(self.conceded_per_game, 3),
+        }
+
+
+@dataclass
+class Momentum:
+    """The most recent games measured against the whole form window.
+
+    Positive ``points_delta`` means the side has been picking up more than its
+    own window average lately — a short-run trend, and a noisy one: over five
+    games these differences are frequently just variance.
+    """
+
+    window: int = MOMENTUM_WINDOW
+    games: int = 0
+    points_per_game: float = 0.0
+    scored_per_game: float = 0.0
+    conceded_per_game: float = 0.0
+    points_delta: float = 0.0
+    scored_delta: float = 0.0
+    conceded_delta: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "window": self.window,
+            "games": self.games,
+            "points_per_game": round(self.points_per_game, 3),
+            "scored_per_game": round(self.scored_per_game, 3),
+            "conceded_per_game": round(self.conceded_per_game, 3),
+            "points_delta": round(self.points_delta, 3),
+            "scored_delta": round(self.scored_delta, 3),
+            "conceded_delta": round(self.conceded_delta, 3),
+        }
+
+
+@dataclass
 class TeamForm:
     """Recent form for one team."""
 
@@ -120,10 +181,25 @@ class TeamForm:
     away: SplitRecord = field(default_factory=SplitRecord)
     streak: str = ""
     games: list[GameResult] = field(default_factory=list)
+    weighted: WeightedForm = field(default_factory=WeightedForm)
+    momentum: Momentum = field(default_factory=Momentum)
+    # Mean goal difference per game of the opponents faced, over the same window.
+    # Positive means a harder-than-average run of fixtures.
+    opponent_strength: float | None = None
 
     @property
     def point_differential(self) -> int:
         return self.overall.scored - self.overall.conceded
+
+    @property
+    def points_per_game(self) -> float:
+        if not self.overall.played:
+            return 0.0
+        points = (
+            POINTS_FOR_RESULT[RESULT_WIN] * self.overall.wins
+            + POINTS_FOR_RESULT[RESULT_DRAW] * self.overall.draws
+        )
+        return points / self.overall.played
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -136,6 +212,10 @@ class TeamForm:
             "away": self.away.to_dict(),
             "streak": self.streak,
             "point_differential": self.point_differential,
+            "points_per_game": round(self.points_per_game, 3),
+            "weighted": self.weighted.to_dict(),
+            "momentum": self.momentum.to_dict(),
+            "opponent_strength": self.opponent_strength,
             "games": [g.to_dict() for g in self.games],
         }
 
@@ -261,7 +341,108 @@ def build_team_form(
         (form.home if own.home_away == Competitor.HOME else form.away).add(game)
 
     form.streak = _streak_of(form.games)
+    form.weighted = _weighted_form(form.games, reference=before)
+    form.momentum = _momentum_of(form.games)
+    form.opponent_strength = _opponent_strength(team, form.games, before)
     return form
+
+
+def _weighted_form(
+    games: list[GameResult],
+    reference: datetime | None = None,
+    half_life_days: float = FORM_HALF_LIFE_DAYS,
+) -> WeightedForm:
+    """Average points and goals with older games discounted exponentially."""
+    weighted = WeightedForm(half_life_days=half_life_days)
+    if not games:
+        return weighted
+
+    anchor = reference or max(game.date for game in games)
+    decay = math.log(2.0) / half_life_days if half_life_days > 0 else 0.0
+
+    total_weight = points = scored = conceded = 0.0
+    for game in games:
+        age_days = max((anchor - game.date).total_seconds() / 86400.0, 0.0)
+        weight = math.exp(-decay * age_days)
+        total_weight += weight
+        points += weight * POINTS_FOR_RESULT[game.result]
+        scored += weight * game.scored
+        conceded += weight * game.conceded
+
+    if total_weight <= 0:
+        return weighted
+
+    weighted.effective_games = total_weight
+    weighted.points_per_game = points / total_weight
+    weighted.scored_per_game = scored / total_weight
+    weighted.conceded_per_game = conceded / total_weight
+    return weighted
+
+
+def _momentum_of(games: list[GameResult], window: int = MOMENTUM_WINDOW) -> Momentum:
+    """Compare the most recent games against the whole form window."""
+    momentum = Momentum(window=window)
+    if not games:
+        return momentum
+
+    recent = games[:window]
+    momentum.games = len(recent)
+    momentum.points_per_game = _mean([POINTS_FOR_RESULT[g.result] for g in recent])
+    momentum.scored_per_game = _mean([float(g.scored) for g in recent])
+    momentum.conceded_per_game = _mean([float(g.conceded) for g in recent])
+
+    momentum.points_delta = momentum.points_per_game - _mean(
+        [POINTS_FOR_RESULT[g.result] for g in games]
+    )
+    momentum.scored_delta = momentum.scored_per_game - _mean([float(g.scored) for g in games])
+    momentum.conceded_delta = momentum.conceded_per_game - _mean([float(g.conceded) for g in games])
+    return momentum
+
+
+def _league_goal_difference(league: League, since: datetime, before: datetime) -> dict[int, float]:
+    """Goal difference per game for every team, over one window, in a single pass."""
+    totals: dict[int, list[float]] = {}
+    for event in _completed_events(league, before).filter(date__gte=since):
+        sides = _sided_competitors(event)
+        if sides is None:
+            continue
+        home, away = sides
+        home_score, away_score = _score_of(home), _score_of(away)
+        if home_score is None or away_score is None:
+            continue
+        totals.setdefault(home.team_id, []).append(home_score - away_score)
+        totals.setdefault(away.team_id, []).append(away_score - home_score)
+    return {team_id: _mean(margins) for team_id, margins in totals.items() if margins}
+
+
+def _opponent_strength(
+    team: Team,
+    games: list[GameResult],
+    before: datetime | None,
+) -> float | None:
+    """Mean goal difference per game of the opponents this team has just faced.
+
+    Answers whether a good run came against good sides. Opponent quality is
+    measured over the same span as the form itself, so it moves with the window
+    rather than being a whole-season constant.
+    """
+    if not games:
+        return None
+
+    anchor = before or max(game.date for game in games)
+    since = min(game.date for game in games)
+    league_rates = _league_goal_difference(team.league, since, anchor)
+    if not league_rates:
+        return None
+
+    opponent_ids = [
+        competitor.team_id
+        for competitor in Competitor.objects.filter(
+            event_id__in=[game.event_id for game in games]
+        ).exclude(team=team)
+    ]
+    faced = [league_rates[team_id] for team_id in opponent_ids if team_id in league_rates]
+    return round(_mean(faced), 3) if faced else None
 
 
 def _streak_of(games: list[GameResult]) -> str:
@@ -336,14 +517,25 @@ def build_league_baseline(
     league: League,
     before: datetime | None = None,
     sample_size: int = 200,
+    window_days: int | None = None,
 ) -> LeagueBaseline:
-    """Derive league-wide home advantage, scoring level and margin spread."""
+    """Derive league-wide home advantage, scoring level and margin spread.
+
+    ``window_days`` restricts the baseline to recent matchdays instead of the
+    whole stored history, so a league whose scoring rate has shifted is measured
+    as it is now. Narrower windows track change faster and are noisier.
+    """
     home_scores: list[int] = []
     away_scores: list[int] = []
     margins: list[int] = []
     draws = 0
 
-    for event in _completed_events(league, before)[:sample_size]:
+    events = _completed_events(league, before)
+    if window_days:
+        anchor = before or datetime.now(UTC)
+        events = events.filter(date__gte=anchor - timedelta(days=window_days))
+
+    for event in events[:sample_size]:
         sides = _sided_competitors(event)
         if sides is None:
             continue
@@ -427,6 +619,7 @@ def _insights(
     away_form: TeamForm,
     h2h: HeadToHead,
     projection: dict[str, Any],
+    contexts: dict[str, Any] | None = None,
 ) -> list[str]:
     notes: list[str] = []
 
@@ -441,6 +634,44 @@ def _insights(
         )
         if form.streak and int(form.streak[1:]) >= 3:
             notes.append(f"{form.abbreviation} is on a {form.streak} run.")
+
+        momentum = form.momentum
+        if momentum.games >= 3 and abs(momentum.points_delta) >= 0.5:
+            direction = "above" if momentum.points_delta > 0 else "below"
+            notes.append(
+                f"{form.abbreviation} is running {abs(round(momentum.points_delta, 2))} points "
+                f"per game {direction} its own {form.overall.played}-game average over the last "
+                f"{momentum.games} — a short sample, so treat it as a hint, not a trend."
+            )
+
+        if form.opponent_strength is not None and abs(form.opponent_strength) >= 0.3:
+            difficulty = "stronger" if form.opponent_strength > 0 else "weaker"
+            notes.append(
+                f"{form.abbreviation} faced {difficulty}-than-average opponents "
+                f"({form.opponent_strength:+.2f} goal difference per game), so that record "
+                f"flatters it less than it looks."
+                if form.opponent_strength > 0
+                else f"{form.abbreviation} faced weaker-than-average opponents "
+                f"({form.opponent_strength:+.2f} goal difference per game)."
+            )
+
+    for side, team in (("home", home), ("away", away)):
+        context = (contexts or {}).get(side)
+        if context is None:
+            continue
+        if context.congested:
+            notes.append(
+                f"{team.abbreviation} has played {context.matches_in_window} matches in 14 days."
+            )
+        if context.rest_days is not None and context.rest_days <= 3:
+            notes.append(f"{team.abbreviation} had only {context.rest_days} days' rest.")
+        burden = context.injuries
+        if burden.count:
+            qualifier = "" if burden.importance_known else " (playing time unknown)"
+            notes.append(
+                f"{team.abbreviation} has {burden.count} listed absence"
+                f"{'s' if burden.count > 1 else ''}, weighted {burden.weighted:.1f}{qualifier}."
+            )
 
     if h2h.played:
         notes.append(
@@ -461,17 +692,11 @@ def _insights(
     return notes
 
 
-def _injury_summary(event: Event, team: Team) -> dict[str, Any]:
-    counts: dict[str, int] = {}
-    names: list[str] = []
-    for injury in Injury.objects.filter(league=event.league, team=team).order_by("athlete_name"):
-        counts[injury.status] = counts.get(injury.status, 0) + 1
-        if len(names) < 10:
-            names.append(f"{injury.athlete_name} ({injury.status_display or injury.status})")
-    return {"total": sum(counts.values()), "by_status": counts, "players": names}
-
-
-def analyze_event(event: Event, lookback: int = DEFAULT_LOOKBACK) -> dict[str, Any]:
+def analyze_event(
+    event: Event,
+    lookback: int = DEFAULT_LOOKBACK,
+    baseline_window_days: int | None = None,
+) -> dict[str, Any]:
     """Produce a full analysis payload for a two-sided event."""
     sides = _sided_competitors(event)
     if sides is None:
@@ -484,7 +709,11 @@ def analyze_event(event: Event, lookback: int = DEFAULT_LOOKBACK) -> dict[str, A
     home_form = build_team_form(home_team, before=event.date, lookback=lookback)
     away_form = build_team_form(away_team, before=event.date, lookback=lookback)
     h2h = build_head_to_head(home_team, away_team, before=event.date, limit=lookback)
-    baseline = build_league_baseline(event.league, before=event.date)
+    baseline = build_league_baseline(
+        event.league, before=event.date, window_days=baseline_window_days
+    )
+    home_context = build_context(event, home_comp)
+    away_context = build_context(event, away_comp)
 
     expected_home = _expected_score(
         home_form.home, home_form.overall, away_form.away, away_form.overall
@@ -533,7 +762,8 @@ def analyze_event(event: Event, lookback: int = DEFAULT_LOOKBACK) -> dict[str, A
             },
             "score": home_comp.score_int,
             "form": home_form.to_dict(),
-            "injuries": _injury_summary(event, home_team),
+            "injuries": home_context.injuries.to_dict(),
+            "context": home_context.to_dict(),
         },
         "away": {
             "team": {
@@ -545,12 +775,21 @@ def analyze_event(event: Event, lookback: int = DEFAULT_LOOKBACK) -> dict[str, A
             },
             "score": away_comp.score_int,
             "form": away_form.to_dict(),
-            "injuries": _injury_summary(event, away_team),
+            "injuries": away_context.injuries.to_dict(),
+            "context": away_context.to_dict(),
         },
         "head_to_head": h2h.to_dict(),
         "league_baseline": baseline.to_dict(),
         "projection": projection,
         "confidence": _confidence(home_form, away_form, baseline),
-        "insights": _insights(home_team, away_team, home_form, away_form, h2h, projection),
+        "insights": _insights(
+            home_team,
+            away_team,
+            home_form,
+            away_form,
+            h2h,
+            projection,
+            contexts={"home": home_context, "away": away_context},
+        ),
         "lookback": lookback,
     }

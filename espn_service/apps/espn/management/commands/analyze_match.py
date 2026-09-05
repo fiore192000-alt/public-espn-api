@@ -106,7 +106,31 @@ class Command(BaseCommand):
             self._record(home["form"]["home"]),
             self._record(away["form"]["away"]),
         )
-        self._row("injuries", home["injuries"]["total"], away["injuries"]["total"])
+        self._row(
+            "absences (weighted)",
+            self._absences(home["injuries"]),
+            self._absences(away["injuries"]),
+        )
+        self._row(
+            "momentum (pts/game)",
+            f"{home['form']['momentum']['points_delta']:+.2f}",
+            f"{away['form']['momentum']['points_delta']:+.2f}",
+        )
+        self._row(
+            "opponent strength",
+            self._optional(home["form"]["opponent_strength"]),
+            self._optional(away["form"]["opponent_strength"]),
+        )
+        self._row(
+            "rest days",
+            self._optional(home["context"]["rest_days"]),
+            self._optional(away["context"]["rest_days"]),
+        )
+        self._row(
+            "matches in 14 days",
+            home["context"]["matches_in_last_14_days"],
+            away["context"]["matches_in_last_14_days"],
+        )
 
         self.stdout.write("")
         self.stdout.write("  Projection")
@@ -131,3 +155,13 @@ class Command(BaseCommand):
     @staticmethod
     def _record(split: dict) -> str:
         return f"{split['wins']}-{split['draws']}-{split['losses']}"
+
+    @staticmethod
+    def _absences(injuries: dict) -> str:
+        if not injuries["count"]:
+            return "0"
+        return f"{injuries['count']} ({injuries['weighted']:.1f})"
+
+    @staticmethod
+    def _optional(value) -> str:
+        return "-" if value is None else str(value)
