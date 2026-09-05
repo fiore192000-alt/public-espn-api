@@ -1,12 +1,19 @@
 """Views for ESPN data API endpoints."""
 
 from django.db.models import QuerySet
+from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.request import Request
 from rest_framework.response import Response
 
+from apps.espn.analysis import (
+    DEFAULT_LOOKBACK,
+    AnalysisNotAvailable,
+    analyze_event,
+    build_team_form,
+)
 from apps.espn.filters import EventFilter, TeamFilter
 from apps.espn.models import (
     AthleteSeasonStats,
@@ -31,6 +38,21 @@ from apps.espn.serializers import (
     TeamSerializer,
     TransactionSerializer,
 )
+
+MAX_LOOKBACK = 50
+
+LOOKBACK_PARAMETER = OpenApiParameter(
+    "lookback",
+    description=f"Games of history per team, 1-{MAX_LOOKBACK} (default: {DEFAULT_LOOKBACK})",
+    type=int,
+)
+
+
+def _lookback_param(request: Request) -> int:
+    raw = request.query_params.get("lookback", "")
+    if not raw.isdigit():
+        return DEFAULT_LOOKBACK
+    return max(1, min(int(raw), MAX_LOOKBACK))
 
 
 class SportViewSet(viewsets.ReadOnlyModelViewSet):
@@ -120,6 +142,21 @@ class TeamViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"error": "Team not found"}, status=404)
         return Response(TeamSerializer(team).data)
 
+    @extend_schema(
+        tags=["Teams"],
+        summary="Get recent form for a team",
+        description=(
+            "Win/draw/loss record, scoring rates, home and away splits, current streak and "
+            "the underlying games, computed from completed events already in the database."
+        ),
+        parameters=[LOOKBACK_PARAMETER],
+        responses={200: OpenApiTypes.OBJECT},
+    )
+    @action(detail=True, methods=["get"])
+    def form(self, request: Request, pk: str | None = None) -> Response:  # noqa: ARG002
+        team = self.get_object()
+        return Response(build_team_form(team, lookback=_lookback_param(request)).to_dict())
+
 
 class EventViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for Event/Game data."""
@@ -170,6 +207,25 @@ class EventViewSet(viewsets.ReadOnlyModelViewSet):
         if not event:
             return Response({"error": "Event not found"}, status=404)
         return Response(EventSerializer(event).data)
+
+    @extend_schema(
+        tags=["Events"],
+        summary="Analyse a match",
+        description=(
+            "Recent form for both sides, head-to-head history, league scoring baseline, and a "
+            "projected score with win probabilities. Only history recorded before the event "
+            "date is used, so past events can be analysed as they would have looked beforehand."
+        ),
+        parameters=[LOOKBACK_PARAMETER],
+        responses={200: OpenApiTypes.OBJECT, 400: OpenApiTypes.OBJECT},
+    )
+    @action(detail=True, methods=["get"])
+    def analysis(self, request: Request, pk: str | None = None) -> Response:  # noqa: ARG002
+        event = self.get_object()
+        try:
+            return Response(analyze_event(event, lookback=_lookback_param(request)))
+        except AnalysisNotAvailable as exc:
+            return Response({"error": str(exc)}, status=400)
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ A production-ready Django REST API for ingesting and querying ESPN sports data.
 
 - **Data Ingestion**: Fetch and persist data from ESPN's public/undocumented API endpoints
 - **REST API**: Clean, paginated endpoints for querying teams, events, and games
+- **Match Analysis**: Team form, head-to-head, projected scores and win probabilities from stored history
 - **Background Jobs**: Celery tasks for scheduled data refresh
 - **Multi-Sport Support**: All 17 ESPN sports — NFL, NBA, MLB, NHL, WNBA, MLS, UFC, PGA, F1, NRL, and more
 - **Production-Ready**: Docker, PostgreSQL, Redis, structured logging, health checks
@@ -79,6 +80,41 @@ GET /healthz
 - `date` - Filter events by date (YYYY-MM-DD)
 - `team` - Filter events by team abbreviation
 - `status` - Filter events by status
+
+### Match Analysis
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/events/{id}/analysis/` | GET | Full match analysis for an event |
+| `/api/v1/teams/{id}/form/` | GET | Recent form for a team |
+
+Both accept `?lookback=N` (1–50, default 10) to set how many past games per team are used.
+
+Analysis is computed entirely from events already stored in the database — no ESPN
+call is made — and only history dated **before** the event is used, so past games can
+be analysed as they would have looked beforehand.
+
+The analysis payload contains:
+
+| Section | Contents |
+|---------|----------|
+| `home` / `away` | Team, current score, `form` (W-D-L, scoring rates, home/away splits, streak, game log) and open injuries |
+| `head_to_head` | Previous meetings, wins per side, combined points per game |
+| `league_baseline` | League scoring level, empirical home advantage, margin spread, draw rate |
+| `projection` | Expected score per side, margin, and `home_win` / `draw` / `away_win` probabilities |
+| `confidence` | `none` / `low` / `medium` / `high`, from the available sample size |
+| `insights` | Plain-language notes summarising the above |
+
+Projected scores blend each side's scoring rate with the opponent's concession rate,
+using home/away splits once they hold at least three games and falling back to the
+overall record otherwise. Win probabilities come from the projected margin against the
+league's own margin spread, with the draw share taken from the league's observed draw rate
+— so leagues without draws simply get zero.
+
+```bash
+curl "http://localhost:8000/api/v1/events/44/analysis/?lookback=10"
+curl "http://localhost:8000/api/v1/teams/7/form/?lookback=5"
+```
 
 ---
 
@@ -230,7 +266,27 @@ python manage.py ingest_all_teams --sport soccer
 
 # Preview what would run without ingesting
 python manage.py ingest_all_teams --dry-run
+
+# Analyse the next scheduled fixtures (or add --event <espn_id> for one match)
+python manage.py analyze_match --league nba --upcoming 3
+python manage.py analyze_match --event 401584666 --json
 ```
+
+### Running without ESPN access
+
+Where ESPN is unreachable (offline work, restricted egress, CI), `seed_demo_data`
+generates a **synthetic** league of fictional teams and pushes it through the real
+ingestion service, so the API and the analysis endpoints have something to work on:
+
+```bash
+python manage.py migrate
+python manage.py seed_demo_data --rounds 10          # soccer-style, draws included
+python manage.py seed_demo_data --profile basketball # high-scoring, no draws
+python manage.py analyze_match --league demo.1 --upcoming 1
+```
+
+The generated teams and results are invented and reproducible from `--seed`. They are
+never real ESPN data — keep them out of any environment where that distinction matters.
 
 ---
 
