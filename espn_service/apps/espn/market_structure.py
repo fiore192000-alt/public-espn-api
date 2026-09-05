@@ -31,6 +31,17 @@ class Returns:
     def add(self, decimal_odds: float, won: bool) -> None:
         self._add_aggregate(profit=decimal_odds - 1.0 if won else -1.0, won=won)
 
+    def add_portfolio(self, returned: float, staked: float) -> None:
+        """Record several dependent legs settled together as one observation.
+
+        Backing more than one outcome of the same match is a single event, not
+        several bets: pooling the legs separately would understate the spread of
+        the result by roughly the square root of how many legs there are.
+        """
+        if staked <= 0:
+            return
+        self._add_aggregate(profit=(returned - staked) / staked, won=returned > 0)
+
     def _add_aggregate(self, profit: float, won: bool) -> None:
         """Record one observation of profit per unit staked."""
         self.bets += 1
@@ -49,6 +60,16 @@ class Returns:
             return 0.0
         variance = (self._squares - self.bets * self.mean**2) / (self.bets - 1)
         return math.sqrt(max(variance, 0.0) / self.bets)
+
+    @property
+    def t_stat(self) -> float:
+        """Mean return in standard errors. Zero when there is nothing to divide by."""
+        return self.mean / self.stderr if self.stderr > 0 else 0.0
+
+    def interval(self, z: float = 1.96) -> tuple[float, float]:
+        """Confidence interval for the mean return per unit staked."""
+        half = z * self.stderr
+        return self.mean - half, self.mean + half
 
     def to_dict(self) -> dict:
         return {
@@ -160,9 +181,8 @@ def compare_prices(
 
         # Collapse the match into one observation at each price level.
         for prices, target in ((book, pooled_at_book), (best, pooled_at_best)):
-            staked = len(usable)
             returned = prices[actual] if actual in usable else 0.0
-            target._add_aggregate(profit=(returned - staked) / staked, won=actual in usable)
+            target.add_portfolio(returned=returned, staked=len(usable))
 
     return PriceComparison(
         selections=[comparison for comparison in comparisons.values() if comparison.at_book.bets],

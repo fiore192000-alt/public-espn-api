@@ -444,6 +444,79 @@ python manage.py seed_demo_data --rounds 60 --with-odds --odds-bias 0.12
 python manage.py backtest_model demo.1 --refit-every 5
 ```
 
+### Searching the price for a bias, and refusing to overclaim one
+
+`find_market_bias` runs the search everybody runs — is some band of prices, or some
+outcome, systematically wrong? — and then applies the gates that decide whether the
+answer means anything. The gates are the point. A search over enough rules always
+produces a winner, and a rule that won a search is not evidence.
+
+```bash
+python manage.py find_market_bias ita.1 --split-year 2019
+python manage.py find_market_bias ita.1 --validate-on eng.1 esp.1 --json
+```
+
+Five gates, in the order they bite:
+
+1. **Discovery and validation are separated.** Rules are ranked on Serie A before
+   2019 only, then re-measured on Serie A from 2019 and on four leagues the search
+   never read.
+2. **The search burden is stated.** Every eligible rule is counted, along with how
+   many would clear `|t| ≥ 2` on pure noise.
+3. **Effects are measured in money.** A calibration gap is not an edge until it
+   clears the margin, so every rule is settled as real flat-staked bets.
+4. **Consistency is required.** Each validation set is reported separately, so a
+   rule that pools positive because one set carries it is visible as such.
+5. **Price selection is separated from the bias.** Every rule is settled twice, at
+   one bookmaker and at the best price. Line shopping recovers margin on *any*
+   selection, so an edge that exists only at the best price is a discount on the
+   fee, not a mispricing.
+
+Bets are pooled **per match, not per leg** — a rule that fires on two outcomes of
+one fixture has one dependent result, not two independent ones.
+
+#### What it finds on 35,883 real matches
+
+The market is not perfectly calibrated. Over the Serie A discovery period, short
+prices come in slightly more often than they imply and long prices slightly less —
+the classic favourite–longshot bias:
+
+| odds | legs | market implies | actually happens | gap |
+|---|---|---|---|---|
+| 1.00–1.50 | 938 | 0.7362 | 0.7623 | **+0.0261** |
+| 1.50–2.00 | 1,812 | 0.5596 | 0.5822 | **+0.0226** |
+| 2.00–3.00 | 3,223 | 0.3952 | 0.4083 | +0.0171 |
+| 3.00–4.00 | 5,302 | 0.2809 | 0.2697 | −0.0106 |
+| 4.00–6.00 | 2,390 | 0.1992 | 0.1862 | −0.0134 |
+| 6.00–10.00 | 1,237 | 0.1236 | 0.1188 | −0.0043 |
+| 10.00+ | 473 | 0.0610 | 0.0359 | **−0.0247** |
+
+The best rule the search found — back anything priced 1.50–2.00, at the best
+available price — returned **+4.97%** over the discovery period, `t = +2.42`. With
+20 eligible hypotheses, **about 1 was expected to clear `|t| ≥ 2` by chance alone.**
+
+Then the gates:
+
+| validation set | matches | yield | t |
+|---|---|---|---|
+| ita.1 2019+ | 886 | +6.22% | +2.17 |
+| eng.1 (all years) | 2,473 | +3.20% | +1.87 |
+| esp.1 (all years) | 2,215 | +1.37% | +0.75 |
+| fra.1 (all years) | 2,234 | −0.94% | −0.51 |
+| ger.1 (all years) | 1,955 | −3.51% | −1.80 |
+| **pooled** | **9,763** | **+0.77%** | 95% CI **[−0.93%, +2.48%]** |
+
+**Not established**, on three counts: the interval contains zero, only 3 of 5 sets
+are positive, and the same rule at a single bookmaker returns **−3.75%** — the
+entire positive figure is the +4.52pp that price selection recovers, not the bias.
+
+The favourite–longshot bias is real and visible. It is also smaller than the margin,
+which is presumably why the bookmaker leaves it there.
+
+The gates are tested in both directions: a fabricated market where a 1.80 shot wins
+70% of the time comes back `ESTABLISHED`, and a fairly priced one comes back empty.
+A search that can only ever say "no edge" is a slogan, not a search.
+
 ---
 
 ## ESPN API Endpoints Reference
@@ -598,6 +671,9 @@ python manage.py ingest_all_teams --dry-run
 # Analyse the next scheduled fixtures (or add --event <espn_id> for one match)
 python manage.py analyze_match --league nba --upcoming 3
 python manage.py analyze_match --event 401584666 --json
+
+# Search the market for a price bias, with the out-of-sample gates applied
+python manage.py find_market_bias ita.1 --split-year 2019
 ```
 
 ### Running without ESPN access
