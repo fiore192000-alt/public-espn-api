@@ -39,6 +39,7 @@ from apps.espn.value import (
     DEFAULT_MAX_STAKE_FRACTION,
     PricedSelection,
     find_value_bets,
+    remove_margin,
 )
 
 OUTCOMES = (markets.SELECTION_HOME, markets.SELECTION_DRAW, markets.SELECTION_AWAY)
@@ -103,6 +104,8 @@ class ForecastRecord:
     actual: str
     home_goals: int
     away_goals: int
+    # The market's own devigged opinion on the same fixture, when odds are stored.
+    market_probabilities: dict[str, float] | None = None
 
 
 @dataclass
@@ -202,6 +205,7 @@ class BacktestReport:
             "accuracy": _accuracy(self.forecasts),
             "model": _scores(self.forecasts),
             "baseline": _baseline_scores(self.forecasts),
+            "market": _market_comparison(self.forecasts),
             "calibration": _calibration(self.forecasts),
             "betting": {
                 "events_with_odds": self.events_with_odds,
@@ -219,19 +223,24 @@ def _accuracy(records: list[ForecastRecord]) -> float | None:
     return round(hits / len(records), 4)
 
 
-def _scores(records: list[ForecastRecord]) -> dict[str, float | None]:
-    if not records:
+def _scores(
+    records: list[ForecastRecord], source: str = "probabilities"
+) -> dict[str, float | None]:
+    """Log-loss and Brier for one set of probabilities over the given records."""
+    usable = [record for record in records if getattr(record, source)]
+    if not usable:
         return {"log_loss": None, "brier": None}
     log_loss = 0.0
     brier = 0.0
-    for record in records:
-        log_loss -= math.log(max(record.probabilities[record.actual], _LOG_FLOOR))
+    for record in usable:
+        probabilities = getattr(record, source)
+        log_loss -= math.log(max(probabilities[record.actual], _LOG_FLOOR))
         for outcome in OUTCOMES:
             actual = 1.0 if outcome == record.actual else 0.0
-            brier += (record.probabilities[outcome] - actual) ** 2
+            brier += (probabilities[outcome] - actual) ** 2
     return {
-        "log_loss": round(log_loss / len(records), 4),
-        "brier": round(brier / len(records), 4),
+        "log_loss": round(log_loss / len(usable), 4),
+        "brier": round(brier / len(usable), 4),
     }
 
 
@@ -264,7 +273,41 @@ def _baseline_scores(records: list[ForecastRecord]) -> dict[str, float | None]:
     return {**_scores(baseline), "rates": {k: round(v, 4) for k, v in rates.items()}}
 
 
-def _calibration(records: list[ForecastRecord]) -> list[dict]:
+def _market_comparison(records: list[ForecastRecord]) -> dict:
+    """Score the model against the bookmaker price on the fixtures both cover.
+
+    This is the question that decides whether any of this is worth betting: not
+    "does the model predict football well" but "does it know something the price
+    does not". Both are scored on the same subset — comparing a model measured on
+    every match against a market measured on the subset with odds would be
+    meaningless.
+
+    Beating the closing price consistently is rare and hard; a model that merely
+    matches it has still learned the market's information, not beaten it.
+    """
+    paired = [record for record in records if record.market_probabilities]
+    if not paired:
+        return {"matches": 0, "model": None, "market": None}
+
+    model = _scores(paired, "probabilities")
+    market = _scores(paired, "market_probabilities")
+    delta = (
+        round(model["log_loss"] - market["log_loss"], 4)
+        if model["log_loss"] is not None and market["log_loss"] is not None
+        else None
+    )
+    return {
+        "matches": len(paired),
+        "model": model,
+        "market": market,
+        # Negative means the model carries information the price did not.
+        "log_loss_delta": delta,
+        "model_beats_market": bool(delta is not None and delta < 0),
+        "market_calibration": _calibration(paired, "market_probabilities"),
+    }
+
+
+def _calibration(records: list[ForecastRecord], source: str = "probabilities") -> list[dict]:
     """Predicted vs observed frequency, over every outcome of every match."""
     buckets: list[dict] = [
         {
@@ -277,8 +320,11 @@ def _calibration(records: list[ForecastRecord]) -> list[dict]:
     ]
 
     for record in records:
+        probabilities = getattr(record, source)
+        if not probabilities:
+            continue
         for outcome in OUTCOMES:
-            probability = record.probabilities[outcome]
+            probability = probabilities[outcome]
             index = min(int(probability * CALIBRATION_BINS), CALIBRATION_BINS - 1)
             buckets[index]["predictions"] += 1
             buckets[index]["_predicted"] += probability
@@ -298,6 +344,36 @@ def _calibration(records: list[ForecastRecord]) -> list[dict]:
             }
         )
     return result
+
+
+# Devigging a "best price across bookmakers" line is meaningless — its overround
+# is near or below 1, so it would read as a permanent edge. The consensus average
+# is the honest representation of what the market thinks.
+MARKET_BENCHMARK_PROVIDERS = ("fd-avg",)
+
+
+def _market_probabilities(prices: list[PricedSelection]) -> dict[str, float] | None:
+    """Devig one provider's 1X2 prices into a probability the model can be scored against."""
+    by_provider: dict[str, dict[str, float]] = {}
+    for price in prices:
+        if price.market != markets.MARKET_MATCH_ODDS or price.line:
+            continue
+        by_provider.setdefault(price.provider_espn_id, {})[price.selection] = price.decimal_odds
+
+    complete = {
+        provider: quotes for provider, quotes in by_provider.items() if set(quotes) == set(OUTCOMES)
+    }
+    if not complete:
+        return None
+
+    provider = next(
+        (name for name in MARKET_BENCHMARK_PROVIDERS if name in complete),
+        next(iter(complete)),
+    )
+    fair = remove_margin(complete[provider])
+    if set(fair) != set(OUTCOMES):
+        return None
+    return {outcome: fair[outcome] for outcome in OUTCOMES}
 
 
 def _priced_selections(event_id: int) -> list[PricedSelection]:
@@ -343,6 +419,13 @@ def run(
     if date_to:
         events = [event for event in events if event.date <= date_to]
 
+    # The league's whole history is read once and sliced in memory as the replay
+    # advances. Re-querying per refit is quadratic and makes multi-season runs
+    # impractical; the slice below is exactly what a query with before=<date>
+    # would have returned, because events are walked in date order.
+    history = sorted(collect_observations(league), key=lambda match: match.date)
+    consumed = 0
+
     model: ModelFit | None = None
     since_refit = 0
 
@@ -355,12 +438,16 @@ def run(
         if home_goals is None or away_goals is None:
             continue
 
+        while consumed < len(history) and history[consumed].date < event.date:
+            consumed += 1
+
         if model is None or since_refit >= refit_every:
-            history = collect_observations(league, before=event.date)
-            if len(history) < MINIMUM_MATCHES:
+            if consumed < MINIMUM_MATCHES:
                 report.skipped_no_history += 1
                 continue
-            model = fit(history, reference_date=event.date, half_life_days=half_life_days)
+            model = fit(
+                history[:consumed], reference_date=event.date, half_life_days=half_life_days
+            )
             report.refits += 1
             since_refit = 0
         since_refit += 1
@@ -373,6 +460,10 @@ def run(
 
         model_markets = markets.summarise(grid)
         probabilities = markets.match_odds(grid)
+        # Prices are read before the reliability gate: the market comparison covers
+        # every scored match, while the gate governs only whether to bet.
+        prices = _priced_selections(event.pk)
+
         report.forecasts.append(
             ForecastRecord(
                 event_espn_id=event.espn_id,
@@ -383,6 +474,7 @@ def run(
                 actual=outcome_of(home_goals, away_goals),
                 home_goals=home_goals,
                 away_goals=away_goals,
+                market_probabilities=_market_probabilities(prices),
             )
         )
 
@@ -390,7 +482,6 @@ def run(
             report.skipped_unreliable_fit += 1
             continue
 
-        prices = _priced_selections(event.pk)
         if not prices:
             continue
         report.events_with_odds += 1

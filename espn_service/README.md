@@ -202,6 +202,26 @@ The ESPN odds parser follows `docs/response_schemas.md` and skips anything it do
 not recognise rather than guessing — **it has not been exercised against the live
 ESPN endpoint**, so expect to adjust it on first real contact.
 
+### Historical data with real odds
+
+ESPN does not serve deep history, and the model needs seasons, not weeks. The
+`ingest_football_data` command loads results, match statistics, pre-match odds and
+ClubElo ratings from a Football-Data-derived CSV:
+
+```bash
+# Matches.csv from https://github.com/xgabora/Club-Football-Match-Data-2000-2025
+# (results and odds originally from https://www.football-data.co.uk/)
+python manage.py ingest_football_data Matches.csv --division I1 --date-from 2015-07-01
+```
+
+Division codes map onto ESPN-style league slugs (`I1` → `ita.1`, `E0` → `eng.1`,
+`SP1` → `esp.1`, …), so a league loaded this way sits alongside anything ingested
+from ESPN and works with every command above. Odds are stored as two providers:
+`fd-avg` (market average) and `fd-max` (best price across bookmakers).
+
+The dataset is **not** committed to this repository — download it separately. Note
+that these are pre-match average and maximum prices, **not** closing odds.
+
 ### Backtesting
 
 ```bash
@@ -238,10 +258,44 @@ so no result informs its own prediction. The report separates two questions:
   yield within two standard errors of zero is indistinguishable from no edge, and
   the command says so out loud. On a few hundred bets that covers most results.
 
+#### Against the market — the result that decides everything
+
+The report scores the model against the **devigged bookmaker price** on the same
+fixtures. This, not accuracy, is the question that matters: a model only has value
+if it knows something the price does not.
+
+Measured on **3,765 real Serie A matches (2015–2025)**, walk-forward:
+
+| | model | market | base rate |
+|---|---|---|---|
+| log loss | 1.0052 | **0.9469** | 1.0767 |
+| Brier | 0.5823 | **0.5610** | 0.6519 |
+
+The model clearly beats a naive base rate — it has learned real football. It is
+just as clearly **worse than the price**, by 0.058 log loss over 3,764 matches.
+Betting it flat lost **6.8% per bet** (standard error 1.4%, t = −4.96): a loss
+large enough that the sample proves it, not variance.
+
+That is the expected outcome, and the reason this comparison exists. Any "value"
+the edge filter finds against a better-informed price is the model's own error
+being mistaken for an opportunity.
+
+Two things the same run showed that are worth acting on:
+
+- **Calibration is good in the middle, overconfident at the top.** In the 0.9–1.0
+  band the model predicted 0.944 and observed 0.743; at 0.8–0.9 it predicted 0.841
+  and observed 0.793. It is most wrong exactly where it would stake most.
+- **The value filter fires far too often** — 8,369 bets over 3,765 matches. Against
+  a superior price, a permissive edge threshold is a machine for finding your own
+  mistakes.
+
 #### Honest limits
 
 - A backtest on `seed_demo_data` measures **nothing** about profitability. The data
   is synthetic and so are the prices. It checks that the machinery works.
+- CLV cannot be computed from this data. Football-Data publishes the market's
+  pre-match average and maximum, not opening-versus-closing prices, so there is no
+  line movement to measure. Real closing odds would be needed.
 - Verified on synthetic data: with prices generated from the true probabilities
   plus a 6% margin, the model finds no edge (yield −3.7%, t = −0.5). With a
   deliberate 12-point inefficiency injected via `--odds-bias`, it finds it (yield

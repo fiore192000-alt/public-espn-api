@@ -109,6 +109,8 @@ class Command(BaseCommand):
             "  window, so it flatters itself. Losing to it narrowly is not damning."
         )
 
+        self._render_market(payload["market"])
+
         self.stdout.write("")
         self.stdout.write("  Calibration (predicted vs observed)")
         for bucket in payload["calibration"]:
@@ -138,10 +140,18 @@ class Command(BaseCommand):
         ):
             self.stdout.write(f"    {label:22}{str(betting[key]):>12}")
 
-        if betting["distinguishable_from_zero"]:
+        if betting["distinguishable_from_zero"] and (betting["flat_stake_yield"] or 0) < 0:
+            self.stdout.write(
+                self.style.ERROR(
+                    "    The yield is more than two standard errors BELOW zero. This is not noise: "
+                    "the selection rule is reliably picking losing bets. Betting it would lose "
+                    "money at a rate the sample size can already prove."
+                )
+            )
+        elif betting["distinguishable_from_zero"]:
             self.stdout.write(
                 self.style.WARNING(
-                    "    The yield is more than two standard errors from zero. That is a signal "
+                    "    The yield is more than two standard errors above zero. That is a signal "
                     "worth investigating, not a guarantee."
                 )
             )
@@ -150,6 +160,38 @@ class Command(BaseCommand):
                 self.style.WARNING(
                     "    This yield is within two standard errors of zero — it is indistinguishable "
                     "from no edge at all, whatever its sign."
+                )
+            )
+
+    def _render_market(self, market: dict) -> None:
+        """The comparison that actually decides whether this is bettable."""
+        self.stdout.write("")
+        self.stdout.write("  Against the market")
+        if not market["matches"]:
+            self.stdout.write("    No stored odds to compare against.")
+            return
+
+        model, prices = market["model"], market["market"]
+        self.stdout.write(f"  {'':22}{'model':>12}{'market':>12}")
+        self.stdout.write(f"  {'log loss':22}{model['log_loss']:>12}{prices['log_loss']:>12}")
+        self.stdout.write(f"  {'brier':22}{model['brier']:>12}{prices['brier']:>12}")
+        self.stdout.write(f"  {'matches compared':22}{market['matches']:>12}")
+
+        delta = market["log_loss_delta"]
+        if market["model_beats_market"]:
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"    The model's log loss is {abs(delta):.4f} below the devigged price. "
+                    "That is the only result here that would justify betting — verify it holds "
+                    "out of sample before acting on it."
+                )
+            )
+        else:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"    The market is better by {delta:.4f} log loss. The model carries no "
+                    "information the price does not already have, so no edge found here is real: "
+                    "any positive yield below is variance."
                 )
             )
 
