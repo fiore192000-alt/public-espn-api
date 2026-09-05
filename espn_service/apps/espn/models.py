@@ -420,6 +420,43 @@ class Transaction(TimestampMixin):
         return self.description[:80]
 
 
+class Odds(TimestampMixin):
+    """One bookmaker price for one selection of one market on an event.
+
+    Prices are stored in decimal form regardless of how the source quoted them,
+    since that is what expected-value and stake calculations work in.
+    """
+
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="odds")
+
+    provider_espn_id = models.CharField(max_length=50, db_index=True)
+    provider_name = models.CharField(max_length=100, blank=True)
+
+    # Market/selection names match the keys produced by apps.espn.markets.
+    market = models.CharField(max_length=30, db_index=True)
+    selection = models.CharField(max_length=30)
+    # Empty for markets without a line; "2.5" and friends for totals.
+    line = models.CharField(max_length=10, blank=True, default="")
+
+    decimal_odds = models.FloatField()
+    raw_data = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["event", "market", "selection"]
+        unique_together = [["event", "provider_espn_id", "market", "selection", "line"]]
+        verbose_name = "Odds"
+        verbose_name_plural = "Odds"
+
+    def __str__(self) -> str:
+        line = f" {self.line}" if self.line else ""
+        return f"{self.event.short_name} {self.market}{line} {self.selection} @ {self.decimal_odds}"
+
+    @property
+    def implied_probability(self) -> float:
+        """Raw implied probability, still including the bookmaker's margin."""
+        return 1.0 / self.decimal_odds if self.decimal_odds > 0 else 0.0
+
+
 class AthleteSeasonStats(TimestampMixin):
     """Athlete season statistics from common/v3 stats endpoint."""
 

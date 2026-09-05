@@ -7,6 +7,7 @@ A production-ready Django REST API for ingesting and querying ESPN sports data.
 - **Data Ingestion**: Fetch and persist data from ESPN's public/undocumented API endpoints
 - **REST API**: Clean, paginated endpoints for querying teams, events, and games
 - **Match Analysis**: Team form, head-to-head, projected scores and win probabilities from stored history
+- **Scoreline Model**: Dixon-Coles fit over league history, reduced to 1X2 / totals / BTTS / correct-score markets, with value detection against bookmaker odds and a walk-forward backtest
 - **Background Jobs**: Celery tasks for scheduled data refresh
 - **Multi-Sport Support**: All 17 ESPN sports — NFL, NBA, MLB, NHL, WNBA, MLS, UFC, PGA, F1, NRL, and more
 - **Production-Ready**: Docker, PostgreSQL, Redis, structured logging, health checks
@@ -114,6 +115,100 @@ league's own margin spread, with the draw share taken from the league's observed
 ```bash
 curl "http://localhost:8000/api/v1/events/44/analysis/?lookback=10"
 curl "http://localhost:8000/api/v1/teams/7/form/?lookback=5"
+```
+
+### Scoreline Model & Betting Markets (football)
+
+`GET /api/v1/events/{id}/forecast/` fits a **Dixon-Coles** model to the league
+history preceding the event and returns a full scoreline distribution, reduced to
+markets:
+
+| Market | Selections |
+|--------|------------|
+| `1x2` | home, draw, away |
+| `double_chance` | home_or_draw, home_or_away, draw_or_away |
+| `totals` | over/under at 0.5, 1.5, 2.5, 3.5, 4.5 |
+| `btts` | yes, no |
+| `correct_score` | most likely exact scorelines |
+
+Every market is a different sum over the *same* probability grid, so they are
+mutually consistent by construction. Each carries `fair_odds` (the break-even
+decimal price).
+
+| Parameter | Meaning |
+|-----------|---------|
+| `half_life` | Days after which a past match counts half as much (default 120) |
+| `edge` | Minimum edge over the devigged market price to flag a bet (default 0.05) |
+| `kelly` | Fraction of full Kelly to stake (default 0.25) |
+
+**Model.** Goals are Poisson with per-team attack and defence strengths and a home
+advantage term, plus the Dixon-Coles low-score correction. Attack, defence and home
+advantage are fitted by weighted maximum likelihood with exponential time decay;
+the correlation term is fitted conditionally. No numpy or scipy — the fit is a few
+hundred lines of plain Python and takes ~0.03s for a 760-match history.
+
+Against simulated leagues with known parameters, the fit recovers attack and
+defence ratings at r > 0.98. `model.reliable` reports whether enough weighted
+history backs the fit; below that, treat the numbers as decoration.
+
+**Value bets.** Where odds are stored for the event, the response also lists
+selections whose model probability beats the bookmaker's *devigged* price by at
+least `edge`, with a fractional Kelly stake. Markets are devigged within their own
+provider and complement — a one-sided quote is skipped, because its overround is
+indistinguishable from an edge.
+
+### Odds
+
+```bash
+# Fetch odds for scheduled events already stored for a league
+python manage.py ingest_odds soccer ita.1 --limit 20
+```
+
+Prices are normalised to decimal on the way in, whatever format the source quotes.
+The ESPN odds parser follows `docs/response_schemas.md` and skips anything it does
+not recognise rather than guessing — **it has not been exercised against the live
+ESPN endpoint**, so expect to adjust it on first real contact.
+
+### Backtesting
+
+```bash
+python manage.py backtest_model ita.1 --refit-every 5
+python manage.py backtest_model ita.1 --edge 0.08 --kelly 0.25 --json
+```
+
+The model is refitted for every match on only the matches that finished before it,
+so no result informs its own prediction. The report separates two questions:
+
+- **Is it calibrated?** Log-loss, Brier score and a predicted-vs-observed
+  calibration table, shown next to a base-rate baseline. That baseline is measured
+  on the same window it scores, so it flatters itself — losing to it narrowly is
+  not damning, clearly beating it is meaningful.
+- **Would betting have made money?** Yield under both Kelly and flat staking, hit
+  rate, max drawdown — **and the standard error and t-statistic of the yield**. A
+  yield within two standard errors of zero is indistinguishable from no edge, and
+  the command says so out loud. On a few hundred bets that covers most results.
+
+#### Honest limits
+
+- A backtest on `seed_demo_data` measures **nothing** about profitability. The data
+  is synthetic and so are the prices. It checks that the machinery works.
+- Verified on synthetic data: with prices generated from the true probabilities
+  plus a 6% margin, the model finds no edge (yield −3.7%, t = −0.5). With a
+  deliberate 12-point inefficiency injected via `--odds-bias`, it finds it (yield
+  +11.9%). The detector responds to real mispricing and does not manufacture it.
+- Devigging one bookmaker recovers roughly that bookmaker's own opinion. Beating it
+  consistently is the entire difficulty; a positive edge is a hypothesis about a
+  price, not a forecast of profit.
+- Kelly assumes the model's probabilities are correct. They are not, which is why
+  the stake defaults to a quarter of Kelly with a hard cap.
+
+```bash
+# End-to-end, offline: synthetic league with fair prices, then with an injected edge
+python manage.py seed_demo_data --rounds 60 --with-odds
+python manage.py backtest_model demo.1 --refit-every 5
+
+python manage.py seed_demo_data --rounds 60 --with-odds --odds-bias 0.12
+python manage.py backtest_model demo.1 --refit-every 5
 ```
 
 ---
