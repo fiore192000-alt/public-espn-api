@@ -220,7 +220,9 @@ from ESPN and works with every command above. Odds are stored as two providers:
 `fd-b365` (Bet365's own price) and `fd-max` (best price across ~17 books).
 
 The dataset is **not** committed to this repository — download it separately. Note
-that these are pre-match average and maximum prices, **not** closing odds.
+that these are Bet365's pre-match price and a best-of-~17 maximum, **not** closing
+odds; for those, load the original football-data.co.uk season files instead — see
+below.
 
 ### Backtesting
 
@@ -443,6 +445,88 @@ python manage.py backtest_model demo.1 --refit-every 5
 python manage.py seed_demo_data --rounds 60 --with-odds --odds-bias 0.12
 python manage.py backtest_model demo.1 --refit-every 5
 ```
+
+### Closing odds, and why they change the question
+
+Every verdict above is measured against a **pre-match** price. That is the noisier
+of the two benchmarks available, and it flatters the models. The original
+Football-Data.co.uk season files also carry **closing** prices — a bookmaker
+abbreviation followed by `C`, so `PSCH` is Pinnacle's closing home price — and
+`ingest_football_data` now reads that layout as well as the derived mirror,
+detecting which one it is looking at from the header.
+
+```bash
+# The original football-data.co.uk season files, which carry closing prices
+python manage.py ingest_football_data "2018-2019/Premier.csv" --division E0
+
+# The derived Club Football Match Data mirror, which does not
+python manage.py ingest_football_data Matches.csv --division I1
+```
+
+Opening and closing quotes are stored as **separate providers** (`fd-ps` and
+`fd-psc`), never as two rows of one provider. The Odds model has no notion of when
+a price was taken, and every analysis here keys on the provider — so keeping them
+apart is what stops a closing line being devigged or settled as if it were a price
+anybody could have taken when the forecast was made.
+
+| provider | what it is |
+|---|---|
+| `fd-b365` / `fd-b365c` | Bet365, pre-match / closing |
+| `fd-ps` / `fd-psc` | **Pinnacle**, pre-match / closing |
+| `fd-avg` / `fd-avgc` | Market average |
+| `fd-max` / `fd-maxc` | Best price across ~17 books (never a coherent book) |
+
+#### What 13,657 matches with both prices say
+
+English football, 2015/16–2020/21, Premier League down to the National League.
+
+**Pinnacle's margin is less than half of Bet365's.** Overround 1.0297 against
+Bet365's 1.0403 here, and 1.0490 on the Serie A data. The wall every model in this
+project has been failing to clear was the *soft* one.
+
+**The closing line is sharper than the opening line, beyond doubt.** Paired on the
+same matches, closing beats opening by **0.00306 of log loss**, `t = +5.20`, 95% CI
+[+0.0019, +0.0042].
+
+| division | matches | close beats open by | t | open overround | close overround |
+|---|---|---|---|---|---|
+| Premier League | 2,084 | +0.00250 | 1.69 | 1.0231 | 1.0228 |
+| Championship | 3,048 | +0.00306 | 2.77 | 1.0270 | 1.0250 |
+| League One | 2,853 | +0.00521 | 4.10 | 1.0316 | 1.0293 |
+| League Two | 2,899 | +0.00226 | 1.87 | 1.0316 | 1.0292 |
+| National League | 2,773 | +0.00213 | 1.37 | 1.0336 | 1.0312 |
+
+A hypothesis worth recording as **not confirmed**: the opening price in the
+National League is not conspicuously worse than in the Premier League, so "less
+watched means more beatable" does not show up here. What does scale with the
+division is the **margin** — 2.31% up to 3.36%. The bookmaker charges more where it
+knows less rather than pricing worse.
+
+#### Closing-line value is a valid feedback metric — measured, not assumed
+
+Taking the opening price only on selections that went on to shorten by the close:
+
+| beat the close by | matches | yield | t |
+|---|---|---|---|
+| any amount | 13,447 | +2.45% | +2.34 |
+| ≥ 1% | 12,645 | +2.21% | +1.92 |
+| ≥ 2% | 11,160 | +3.22% | +2.47 |
+| ≥ 3% | 9,490 | +4.61% | +3.12 |
+| ≥ 5% | 6,619 | **+7.96%** | +4.15 |
+
+Profitable at Pinnacle's own opening price, margin included, and rising with the
+size of the beat. (The 1% row dipping below the 0% row is noise, not a pattern.)
+
+**This is not a strategy, and reading it as one is the trap.** Selecting bets by
+whether they beat the close requires knowing the close — which exists only after
+the moment you would have had to bet. It is pure hindsight, the same error as
+devigging a best-price line.
+
+What it does establish is the thing worth having: **beating the close predicts
+profit on this data**. So a model that picks in advance and systematically beats
+the closing line is producing real edge, and that can be measured on a few thousand
+matches against a continuous target instead of thirty thousand against a coin flip.
+That is the feedback loop every negative result above was missing.
 
 ### Searching the price for a bias, and refusing to overclaim one
 
