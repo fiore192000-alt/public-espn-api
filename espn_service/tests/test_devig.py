@@ -7,7 +7,7 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
-from apps.espn import devig, value
+from apps.espn import devig, market_structure, value
 from apps.espn.models import League
 from tests.test_football_data import HEADER
 from tests.test_football_data import row as fd_row
@@ -183,9 +183,10 @@ class TestMeasureDevigCommand:
         assert len(payload["methods"]) == len(devig.METHODS)
         assert payload["microstructure"]["book_overround"] > 1.0
         # The best price across books is close to margin-free.
-        assert payload["microstructure"]["best_price_overround"] < payload["microstructure"][
-            "book_overround"
-        ]
+        assert (
+            payload["microstructure"]["best_price_overround"]
+            < payload["microstructure"]["book_overround"]
+        )
 
     def test_unknown_league_raises(self, db):
         with pytest.raises(CommandError):
@@ -194,3 +195,109 @@ class TestMeasureDevigCommand:
     def test_unknown_provider_raises(self, loaded):
         with pytest.raises(CommandError):
             call_command("measure_devig", "ita.1", provider="not-a-book", stdout=StringIO())
+
+
+class TestPriceComparison:
+    """Realised returns of flat-staking at two price levels."""
+
+    BOOK = {"home": 1.90, "draw": 3.30, "away": 4.00}
+    BEST = {"home": 2.05, "draw": 3.60, "away": 4.40}
+    SIDES = ("away", "draw", "home")
+
+    def books(self, outcomes: list[str]):
+        return [(self.BOOK, self.BEST, outcome) for outcome in outcomes]
+
+    def test_a_winning_selection_returns_its_odds(self):
+        comparison = market_structure.compare_prices(self.books(["home"]), self.SIDES)
+        home = next(c for c in comparison.selections if c.selection == "home")
+
+        assert home.at_book.mean == pytest.approx(0.90)
+        assert home.at_best.mean == pytest.approx(1.05)
+        assert home.recovered == pytest.approx(0.15)
+
+    def test_a_losing_selection_loses_its_stake(self):
+        comparison = market_structure.compare_prices(self.books(["home"]), self.SIDES)
+        away = next(c for c in comparison.selections if c.selection == "away")
+
+        assert away.at_book.mean == pytest.approx(-1.0)
+        assert away.at_best.mean == pytest.approx(-1.0)
+        # A losing leg recovers nothing: the better price never paid out.
+        assert away.recovered == pytest.approx(0.0)
+
+    def test_pooling_counts_matches_not_legs(self):
+        comparison = market_structure.compare_prices(self.books(["home", "draw"]), self.SIDES)
+
+        assert comparison.pooled_at_book.bets == 2
+        assert sum(c.at_book.bets for c in comparison.selections) == 6
+
+    def test_pooled_return_is_the_winning_odds_over_the_stake(self):
+        comparison = market_structure.compare_prices(self.books(["home"]), self.SIDES)
+
+        # Three units staked, 1.90 returned at the book.
+        assert comparison.pooled_at_book.mean == pytest.approx((1.90 - 3) / 3)
+        assert comparison.pooled_at_best.mean == pytest.approx((2.05 - 3) / 3)
+
+    def test_pooled_standard_error_is_smaller_than_per_leg(self):
+        # Backing all three outcomes is nearly a hedge, so the pooled spread is
+        # far tighter than any single leg's. Treating legs as independent bets
+        # would misstate it.
+        outcomes = ["home", "draw", "away"] * 20
+        comparison = market_structure.compare_prices(self.books(outcomes), self.SIDES)
+        per_leg = next(c for c in comparison.selections if c.selection == "home")
+
+        assert comparison.pooled_at_book.stderr < per_leg.at_book.stderr
+
+    def test_a_genuinely_profitable_price_is_recognised(self):
+        generous = {"home": 5.0, "draw": 5.0, "away": 5.0}
+        books = [(self.BOOK, generous, "home")] * 100
+        comparison = market_structure.compare_prices(books, self.SIDES)
+
+        assert comparison.profitable_at_best is True
+
+    def test_an_efficient_book_is_not_called_profitable(self):
+        # Outcomes drawn in proportion to the book's own devigged probabilities:
+        # the realistic case, where the price is right and the margin is the only
+        # thing left. Uniform outcomes would instead make any book with a skewed
+        # line profitable, which says nothing about price selection.
+        priced = {"home": 1.95, "draw": 3.50, "away": 4.10}
+        fair = devig.proportional(priced)
+        outcomes = [
+            selection
+            for selection, probability in fair.items()
+            for _ in range(round(probability * 1000))
+        ]
+
+        comparison = market_structure.compare_prices(
+            [(self.BOOK, priced, outcome) for outcome in outcomes], self.SIDES
+        )
+
+        assert comparison.pooled_at_best.mean < 0
+        assert comparison.profitable_at_best is False
+
+    def test_too_few_bets_is_never_called_profitable(self):
+        generous = {"home": 5.0, "draw": 5.0, "away": 5.0}
+        comparison = market_structure.compare_prices([(self.BOOK, generous, "home")], self.SIDES)
+
+        assert comparison.pooled_at_best.mean > 0
+        assert comparison.profitable_at_best is False
+
+    def test_selections_missing_from_a_book_are_skipped(self):
+        partial = {"home": 2.0}
+        comparison = market_structure.compare_prices([(partial, partial, "home")], self.SIDES)
+
+        assert [c.selection for c in comparison.selections] == ["home"]
+        assert comparison.pooled_at_book.bets == 1
+
+    def test_summarise_serialises_both_levels(self):
+        payload = market_structure.summarise(
+            market_structure.compare_prices(self.books(["home", "away"]), self.SIDES)
+        )
+
+        assert payload["pooled"]["matches"] == 2
+        assert set(payload["pooled"]) >= {"at_book", "at_best", "recovered", "profitable_at_best"}
+        assert len(payload["selections"]) == 3
+
+    def test_no_books_produces_nothing(self):
+        comparison = market_structure.compare_prices([], self.SIDES)
+        assert comparison.selections == []
+        assert comparison.pooled_at_book.bets == 0

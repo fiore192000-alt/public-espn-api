@@ -9,7 +9,7 @@ import statistics
 
 from django.core.management.base import BaseCommand, CommandError
 
-from apps.espn import devig
+from apps.espn import devig, market_structure
 from apps.espn.analysis import _sided_competitors
 from apps.espn.backtest import outcome_of
 from apps.espn.markets import MARKET_MATCH_ODDS, SELECTION_AWAY, SELECTION_DRAW, SELECTION_HOME
@@ -39,6 +39,7 @@ class Command(BaseCommand):
             raise CommandError(f"No league with slug {options['league']!r}.") from exc
 
         books, single_overrounds, best_overrounds, best_gains = [], [], [], []
+        priced_pairs: list[tuple[dict[str, float], dict[str, float], str]] = []
 
         for event in (
             Event.objects.filter(league=league, status=Event.STATUS_FINAL)
@@ -68,6 +69,7 @@ class Command(BaseCommand):
             if best and set(best) == OUTCOMES:
                 best_overrounds.append(devig.overround(best))
                 best_gains.append(max(best[side] / book[side] for side in OUTCOMES))
+                priced_pairs.append((book, best, outcome_of(home.score_int, away.score_int)))
 
         if not books:
             raise CommandError(
@@ -82,6 +84,11 @@ class Command(BaseCommand):
             "books": len(books),
             "methods": [score.to_dict() for score in scores],
             "microstructure": _microstructure(single_overrounds, best_overrounds, best_gains),
+            "price_selection": market_structure.summarise(
+                market_structure.compare_prices(priced_pairs, tuple(sorted(OUTCOMES)))
+            )
+            if priced_pairs
+            else None,
         }
 
         if options["json"]:
@@ -89,6 +96,8 @@ class Command(BaseCommand):
             return
 
         self._render(payload)
+
+    _implied_from_overround: float | None = None
 
     def _render(self, payload: dict) -> None:
         self.stdout.write("")
@@ -116,6 +125,11 @@ class Command(BaseCommand):
         self.stdout.write("  Market structure")
         self.stdout.write(f"    {'book overround':28}{structure['book_overround']:>10}")
         self.stdout.write(f"    {'book margin':28}{structure['book_margin_pct']:>9}%")
+        self._implied_from_overround = (
+            1.0 / structure["best_price_overround"] - 1.0
+            if structure["best_price_overround"]
+            else None
+        )
         if structure["best_price_overround"] is not None:
             self.stdout.write(
                 f"    {'best-price overround':28}{structure['best_price_overround']:>10}"
@@ -123,13 +137,69 @@ class Command(BaseCommand):
             self.stdout.write(
                 f"    {'best vs book, best leg':28}{structure['best_price_gain_pct']:>9}%"
             )
+        self._render_price_selection(payload.get("price_selection"))
+
+    def _render_price_selection(self, selection: dict | None) -> None:
+        """What flat-staking at each price level actually returned."""
+        if not selection:
+            return
+
+        self.stdout.write("")
+        self.stdout.write("  Flat-staking every selection, settled on real results")
+        self.stdout.write(f"    {'':10}{'at book':>12}{'at best':>12}{'recovered':>12}")
+        for row in selection["selections"]:
+            self.stdout.write(
+                f"    {row['selection']:10}{row['at_book']['yield']:>12}"
+                f"{row['at_best']['yield']:>12}{row['recovered']:>12}"
+            )
+
+        pooled = selection["pooled"]
+        self.stdout.write(
+            f"    {'pooled':10}{pooled['at_book']['yield']:>12}"
+            f"{pooled['at_best']['yield']:>12}{pooled['recovered']:>12}"
+        )
+        self.stdout.write(
+            f"    (pooled over {pooled['matches']} matches, not legs: the three outcomes of "
+            f"one match are a single dependent event. Yield standard error "
+            f"{pooled['at_best']['stderr']} at the best price.)"
+        )
+
+        implied = self._implied_from_overround
+        if implied is not None:
+            realised = pooled["at_best"]["yield"]
+            gap = implied - realised
             self.stdout.write("")
             self.stdout.write(
+                f"    Backing all three at the best price: overround implies {implied:+.4f}, "
+                f"actually returned {realised:+.4f}."
+            )
+            if gap > 0.005:
+                self.stdout.write(
+                    self.style.ERROR(
+                        f"    The overround overstates price selection by {gap:.4f} — "
+                        f"{gap * 100:.1f} percentage points. Three maxima taken across different "
+                        "books are not one coherent book: the best price tends to be highest on "
+                        "the outcomes that go on to lose, so the near-1.0 overround is not a "
+                        "return you can collect. Trust the realised figure, not the summary."
+                    )
+                )
+
+        self.stdout.write("")
+        if pooled["profitable_at_best"]:
+            self.stdout.write(
+                self.style.SUCCESS(
+                    "    Taking the best price is profitable on its own here, by more than two "
+                    "standard errors. That is unusual enough to double-check the data before "
+                    "believing it."
+                )
+            )
+        else:
+            self.stdout.write(
                 self.style.WARNING(
-                    "    Taking the best price available across books removes almost the whole "
-                    "margin, and does so without predicting anything. On this data that is a "
-                    "larger and far more reliable effect than any model edge measured so far — "
-                    "price selection beats outcome prediction."
+                    "    Taking the best price recovers most of the bookmaker's margin, but it "
+                    "does NOT create an edge: flat-staking at the best price is still not "
+                    "profitable. Price selection is what makes a genuine edge survivable — it is "
+                    "not a substitute for having one."
                 )
             )
 

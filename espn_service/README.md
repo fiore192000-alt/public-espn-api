@@ -389,15 +389,34 @@ the project so far:
 | Best price across ~17 books | **1.0003** |
 | Best price vs Bet365, best leg | **+9.82%** |
 
-Taking the best available price across bookmakers removes **almost the entire
-margin** — the best-of-17 book is very nearly margin-free — and it requires
-predicting nothing at all.
+That near-1.0 overround looks like it removes the entire margin. **It does not**,
+and the difference matters enough to measure directly rather than infer.
 
-On this data that is a larger and far more reliable effect than any model edge
-measured so far. Every model tested has failed to beat one bookmaker's pre-match
-line, while price selection alone is worth roughly 9.8% on the best leg of a
-three-way book. **Where the money is here is in the price you take, not in the
-outcome you forecast.**
+Flat-staking every selection and settling on real results, over 3,799 matches:
+
+| | at Bet365 | at best price | recovered |
+|---|---|---|---|
+| home | −11.56% | −7.42% | +4.14pp |
+| draw | −4.18% | +1.25% | +5.42pp |
+| away | −8.63% | −2.27% | +6.36pp |
+| **pooled** | **−8.12%** | **−2.81%** | **+5.31pp** |
+
+Price selection is worth **5.3 percentage points of yield** — large, real, and it
+requires predicting nothing. But two things must be said plainly:
+
+- **It does not make you profitable.** At the best price the yield is still −2.81%,
+  with a standard error of 0.91% over 3,799 matches: reliably losing, not merely
+  unproven. Line shopping is what makes a genuine edge survivable; it is not a
+  substitute for having one.
+- **The overround overstates it by 2.8 percentage points.** An overround of 1.0003
+  implies backing all three outcomes returns −0.03%; it actually returned −2.81%.
+  Three maxima taken across different books are not one coherent book — the best
+  price tends to be highest on the outcomes that go on to lose. The realised figure
+  is the trustworthy one.
+
+The pooled figure is accumulated **per match, not per leg**: the three outcomes of
+one match are a single dependent event, so treating them as three independent bets
+misstates the spread.
 
 #### Honest limits
 
