@@ -7,6 +7,7 @@ A production-ready Django REST API for ingesting and querying ESPN sports data.
 - **Data Ingestion**: Fetch and persist data from ESPN's public/undocumented API endpoints
 - **REST API**: Clean, paginated endpoints for querying teams, events, and games
 - **Match Analysis**: Team form, head-to-head, projected scores and win probabilities from stored history
+- **Scoreline Model**: Dixon-Coles fit over league history, reduced to 1X2 / totals / BTTS / correct-score markets, with value detection against bookmaker odds and a walk-forward backtest
 - **Background Jobs**: Celery tasks for scheduled data refresh
 - **Multi-Sport Support**: All 17 ESPN sports — NFL, NBA, MLB, NHL, WNBA, MLS, UFC, PGA, F1, NRL, and more
 - **Production-Ready**: Docker, PostgreSQL, Redis, structured logging, health checks
@@ -98,22 +99,220 @@ The analysis payload contains:
 
 | Section | Contents |
 |---------|----------|
-| `home` / `away` | Team, current score, `form` (W-D-L, scoring rates, home/away splits, streak, game log) and open injuries |
+| `home` / `away` | Team, current score, `form`, `context` and weighted absences |
 | `head_to_head` | Previous meetings, wins per side, combined points per game |
 | `league_baseline` | League scoring level, empirical home advantage, margin spread, draw rate |
-| `projection` | Expected score per side, margin, and `home_win` / `draw` / `away_win` probabilities |
+| `projection` | Expected score per side, margin, `home_win` / `draw` / `away_win` probabilities, and the `source` that produced them |
 | `confidence` | `none` / `low` / `medium` / `high`, from the available sample size |
 | `insights` | Plain-language notes summarising the above |
 
-Projected scores blend each side's scoring rate with the opponent's concession rate,
-using home/away splits once they hold at least three games and falling back to the
-overall record otherwise. Win probabilities come from the projected margin against the
-league's own margin spread, with the draw share taken from the league's observed draw rate
-— so leagues without draws simply get zero.
+Each side's `form` carries, beyond the plain record:
+
+| Field | Meaning |
+|-------|---------|
+| `weighted` | Points and goals per game with older matches discounted (60-day half-life) |
+| `momentum` | The last 5 games against the side's own window average — `points_delta` above zero means it has been picking up more than usual lately |
+| `opponent_strength` | Mean goal difference per game of the opponents actually faced, so a good run against weak sides reads as one |
+
+And `context` carries the situational picture:
+
+| Field | Meaning |
+|-------|---------|
+| `rest_days` | Days since that side's previous completed match |
+| `matches_in_last_14_days` / `congested` | Fixture pile-up |
+| `injuries` | Absences weighted by status severity **and**, where season appearances are stored, by how much the player actually plays. `importance_known` says whether that playing-time weighting was available — ESPN's injury feed does not mark starters, so without stored stats every absence counts the same |
+
+**None of these feed the projection.** They are reported next to it, because none has
+been validated against real results yet, and an unvalidated adjustment makes a model
+worse while looking more sophisticated. Wire one in only after the backtest says it
+helps.
+
+#### Where the projection comes from
+
+`projection.source` says which method produced the numbers:
+
+| Source | When | Draw probability |
+|--------|------|------------------|
+| `dixon_coles` | Default, whenever the league has enough history to fit | Derived per fixture from the scoreline distribution |
+| `fallback_form` | Only when the league has fewer than 20 completed matches | The league's observed draw rate — **the same constant for every fixture** |
+
+The model path is the same fit that backs `/forecast/`, so the two endpoints agree
+rather than offering contradictory probabilities for one match. When the fallback is
+used, `insights` says so explicitly.
+
+The fallback blends each side's scoring rate with the opponent's concession rate, using
+home/away splits once they hold at least three games. It cannot tell a tight match from
+a mismatch as far as the draw is concerned, which is exactly why it is a fallback: with
+20 matches stored the model takes over.
 
 ```bash
 curl "http://localhost:8000/api/v1/events/44/analysis/?lookback=10"
 curl "http://localhost:8000/api/v1/teams/7/form/?lookback=5"
+```
+
+### Scoreline Model & Betting Markets (football)
+
+`GET /api/v1/events/{id}/forecast/` fits a **Dixon-Coles** model to the league
+history preceding the event and returns a full scoreline distribution, reduced to
+markets:
+
+| Market | Selections |
+|--------|------------|
+| `1x2` | home, draw, away |
+| `double_chance` | home_or_draw, home_or_away, draw_or_away |
+| `totals` | over/under at 0.5, 1.5, 2.5, 3.5, 4.5 |
+| `btts` | yes, no |
+| `correct_score` | most likely exact scorelines |
+
+Every market is a different sum over the *same* probability grid, so they are
+mutually consistent by construction. Each carries `fair_odds` (the break-even
+decimal price).
+
+| Parameter | Meaning |
+|-----------|---------|
+| `half_life` | Days after which a past match counts half as much (default 120) |
+| `edge` | Minimum edge over the devigged market price to flag a bet (default 0.05) |
+| `kelly` | Fraction of full Kelly to stake (default 0.25) |
+
+**Model.** Goals are Poisson with per-team attack and defence strengths and a home
+advantage term, plus the Dixon-Coles low-score correction. Attack, defence and home
+advantage are fitted by weighted maximum likelihood with exponential time decay;
+the correlation term is fitted conditionally. No numpy or scipy — the fit is a few
+hundred lines of plain Python and takes ~0.03s for a 760-match history.
+
+Against simulated leagues with known parameters, the fit recovers attack and
+defence ratings at r > 0.98. `model.reliable` reports whether enough weighted
+history backs the fit; below that, treat the numbers as decoration.
+
+**Value bets.** Where odds are stored for the event, the response also lists
+selections whose model probability beats the bookmaker's *devigged* price by at
+least `edge`, with a fractional Kelly stake. Markets are devigged within their own
+provider and complement — a one-sided quote is skipped, because its overround is
+indistinguishable from an edge.
+
+### Odds
+
+```bash
+# Fetch odds for scheduled events already stored for a league
+python manage.py ingest_odds soccer ita.1 --limit 20
+```
+
+Prices are normalised to decimal on the way in, whatever format the source quotes.
+The ESPN odds parser follows `docs/response_schemas.md` and skips anything it does
+not recognise rather than guessing — **it has not been exercised against the live
+ESPN endpoint**, so expect to adjust it on first real contact.
+
+### Historical data with real odds
+
+ESPN does not serve deep history, and the model needs seasons, not weeks. The
+`ingest_football_data` command loads results, match statistics, pre-match odds and
+ClubElo ratings from a Football-Data-derived CSV:
+
+```bash
+# Matches.csv from https://github.com/xgabora/Club-Football-Match-Data-2000-2025
+# (results and odds originally from https://www.football-data.co.uk/)
+python manage.py ingest_football_data Matches.csv --division I1 --date-from 2015-07-01
+```
+
+Division codes map onto ESPN-style league slugs (`I1` → `ita.1`, `E0` → `eng.1`,
+`SP1` → `esp.1`, …), so a league loaded this way sits alongside anything ingested
+from ESPN and works with every command above. Odds are stored as two providers:
+`fd-avg` (market average) and `fd-max` (best price across bookmakers).
+
+The dataset is **not** committed to this repository — download it separately. Note
+that these are pre-match average and maximum prices, **not** closing odds.
+
+### Backtesting
+
+```bash
+python manage.py backtest_model ita.1 --refit-every 5
+python manage.py backtest_model ita.1 --edge 0.08 --kelly 0.25 --json
+```
+
+#### Choosing the half-life from the data
+
+The decay half-life decides how fast old matches stop counting — that is, how quickly
+the league turns over. Guessing it is guessing that. `tune_model` runs the same
+walk-forward backtest at each candidate and ranks them by out-of-sample log-loss:
+
+```bash
+python manage.py tune_model ita.1 --half-lives 30,60,90,120,180,365 --refit-every 5
+```
+
+Every candidate scores the same matches, so the numbers are comparable. The command
+also reports the spread across candidates and says so when they are too close to
+separate — on a few hundred matches, neighbouring half-lives usually differ by noise,
+and picking the winner then means tuning to noise. It also warns when even the best
+candidate fails to beat the base-rate reference, which means the model is not yet
+adding skill on that data at any setting.
+
+The model is refitted for every match on only the matches that finished before it,
+so no result informs its own prediction. The report separates two questions:
+
+- **Is it calibrated?** Log-loss, Brier score and a predicted-vs-observed
+  calibration table, shown next to a base-rate baseline. That baseline is measured
+  on the same window it scores, so it flatters itself — losing to it narrowly is
+  not damning, clearly beating it is meaningful.
+- **Would betting have made money?** Yield under both Kelly and flat staking, hit
+  rate, max drawdown — **and the standard error and t-statistic of the yield**. A
+  yield within two standard errors of zero is indistinguishable from no edge, and
+  the command says so out loud. On a few hundred bets that covers most results.
+
+#### Against the market — the result that decides everything
+
+The report scores the model against the **devigged bookmaker price** on the same
+fixtures. This, not accuracy, is the question that matters: a model only has value
+if it knows something the price does not.
+
+Measured on **3,765 real Serie A matches (2015–2025)**, walk-forward:
+
+| | model | market | base rate |
+|---|---|---|---|
+| log loss | 1.0052 | **0.9469** | 1.0767 |
+| Brier | 0.5823 | **0.5610** | 0.6519 |
+
+The model clearly beats a naive base rate — it has learned real football. It is
+just as clearly **worse than the price**, by 0.058 log loss over 3,764 matches.
+Betting it flat lost **6.8% per bet** (standard error 1.4%, t = −4.96): a loss
+large enough that the sample proves it, not variance.
+
+That is the expected outcome, and the reason this comparison exists. Any "value"
+the edge filter finds against a better-informed price is the model's own error
+being mistaken for an opportunity.
+
+Two things the same run showed that are worth acting on:
+
+- **Calibration is good in the middle, overconfident at the top.** In the 0.9–1.0
+  band the model predicted 0.944 and observed 0.743; at 0.8–0.9 it predicted 0.841
+  and observed 0.793. It is most wrong exactly where it would stake most.
+- **The value filter fires far too often** — 8,369 bets over 3,765 matches. Against
+  a superior price, a permissive edge threshold is a machine for finding your own
+  mistakes.
+
+#### Honest limits
+
+- A backtest on `seed_demo_data` measures **nothing** about profitability. The data
+  is synthetic and so are the prices. It checks that the machinery works.
+- CLV cannot be computed from this data. Football-Data publishes the market's
+  pre-match average and maximum, not opening-versus-closing prices, so there is no
+  line movement to measure. Real closing odds would be needed.
+- Verified on synthetic data: with prices generated from the true probabilities
+  plus a 6% margin, the model finds no edge (yield −3.7%, t = −0.5). With a
+  deliberate 12-point inefficiency injected via `--odds-bias`, it finds it (yield
+  +11.9%). The detector responds to real mispricing and does not manufacture it.
+- Devigging one bookmaker recovers roughly that bookmaker's own opinion. Beating it
+  consistently is the entire difficulty; a positive edge is a hypothesis about a
+  price, not a forecast of profit.
+- Kelly assumes the model's probabilities are correct. They are not, which is why
+  the stake defaults to a quarter of Kelly with a hard cap.
+
+```bash
+# End-to-end, offline: synthetic league with fair prices, then with an injected edge
+python manage.py seed_demo_data --rounds 60 --with-odds
+python manage.py backtest_model demo.1 --refit-every 5
+
+python manage.py seed_demo_data --rounds 60 --with-odds --odds-bias 0.12
+python manage.py backtest_model demo.1 --refit-every 5
 ```
 
 ---

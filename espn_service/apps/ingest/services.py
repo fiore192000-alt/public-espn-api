@@ -710,3 +710,82 @@ class AthleteStatsIngestionService:
             raise IngestionError(f"Failed to ingest athlete stats: {e}") from e
 
         return result
+
+
+class OddsIngestionService:
+    """Service for ingesting bookmaker odds from the ESPN Core API.
+
+    ESPN's odds payloads vary by sport and provider. `parse_odds_payload` skips
+    anything it does not recognise rather than guessing, so a partial parse
+    yields fewer rows instead of wrong prices.
+    """
+
+    def __init__(self, client: ESPNClient | None = None):
+        self.client = client or get_espn_client()
+
+    @transaction.atomic
+    def ingest_event_odds(self, sport: str, league: str, event: Event) -> IngestionResult:
+        """Ingest every provider's prices for one event."""
+        from apps.espn.models import Odds
+        from apps.espn.odds_parsing import parse_odds_payload
+
+        result = IngestionResult(details=[])
+
+        try:
+            response = self.client.get_odds(sport, league, event.espn_id)
+            rows = parse_odds_payload(response.data)
+
+            if not rows:
+                logger.info("no_odds_found", sport=sport, league=league, event_id=event.espn_id)
+                return result
+
+            for row in rows:
+                try:
+                    _, created = Odds.objects.update_or_create(
+                        event=event,
+                        provider_espn_id=row["provider_espn_id"],
+                        market=row["market"],
+                        selection=row["selection"],
+                        line=row["line"],
+                        defaults={
+                            "provider_name": row["provider_name"],
+                            "decimal_odds": row["decimal_odds"],
+                            "raw_data": row["raw_data"],
+                        },
+                    )
+                    if created:
+                        result.created += 1
+                    else:
+                        result.updated += 1
+                except Exception as e:
+                    logger.error("odds_row_error", event_id=event.espn_id, error=str(e))
+                    result.errors += 1
+
+            logger.info(
+                "odds_ingested",
+                sport=sport,
+                league=league,
+                event_id=event.espn_id,
+                created=result.created,
+                updated=result.updated,
+            )
+
+        except Exception as e:
+            logger.exception("odds_ingestion_failed", sport=sport, league=league, event_id=event.espn_id)
+            raise IngestionError(f"Failed to ingest odds for {event.espn_id}: {e}") from e
+
+        return result
+
+    def ingest_league_odds(self, sport: str, league: str, events: list[Event]) -> IngestionResult:
+        """Ingest odds for a batch of events, carrying on past individual failures."""
+        total = IngestionResult(details=[])
+        for event in events:
+            try:
+                result = self.ingest_event_odds(sport, league, event)
+                total.created += result.created
+                total.updated += result.updated
+                total.errors += result.errors
+            except IngestionError as e:
+                logger.warning("odds_event_skipped", event_id=event.espn_id, error=str(e))
+                total.errors += 1
+        return total

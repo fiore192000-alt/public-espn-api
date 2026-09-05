@@ -14,7 +14,9 @@ from apps.espn.analysis import (
     analyze_event,
     build_team_form,
 )
+from apps.espn.dixon_coles import DEFAULT_HALF_LIFE_DAYS, NotEnoughData
 from apps.espn.filters import EventFilter, TeamFilter
+from apps.espn.forecast import forecast_event
 from apps.espn.models import (
     AthleteSeasonStats,
     Event,
@@ -38,6 +40,12 @@ from apps.espn.serializers import (
     TeamSerializer,
     TransactionSerializer,
 )
+from apps.espn.value import (
+    DEFAULT_EDGE_THRESHOLD,
+    DEFAULT_KELLY_FRACTION,
+    PricedSelection,
+    find_value_bets,
+)
 
 MAX_LOOKBACK = 50
 
@@ -53,6 +61,14 @@ def _lookback_param(request: Request) -> int:
     if not raw.isdigit():
         return DEFAULT_LOOKBACK
     return max(1, min(int(raw), MAX_LOOKBACK))
+
+
+def _float_param(request: Request, name: str, default: float) -> float:
+    try:
+        value = float(request.query_params[name])
+    except (KeyError, TypeError, ValueError):
+        return default
+    return value if value > 0 else default
 
 
 class SportViewSet(viewsets.ReadOnlyModelViewSet):
@@ -226,6 +242,69 @@ class EventViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(analyze_event(event, lookback=_lookback_param(request)))
         except AnalysisNotAvailable as exc:
             return Response({"error": str(exc)}, status=400)
+
+    @extend_schema(
+        tags=["Events"],
+        summary="Model-based market probabilities for a match",
+        description=(
+            "Fits a Dixon-Coles scoreline model to the league history preceding this "
+            "event and returns probabilities for 1X2, double chance, over/under, both "
+            "teams to score and the most likely correct scores, each with fair odds.\n\n"
+            "Where bookmaker odds are stored for the event, selections whose model "
+            "probability beats the devigged market price by at least `edge` are also "
+            "returned, with a fractional Kelly stake. A positive edge is a hypothesis "
+            "about a price, not a prediction of profit; `model.reliable` reports whether "
+            "the fit rests on enough history to be worth acting on at all."
+        ),
+        parameters=[
+            OpenApiParameter(
+                "half_life",
+                description=f"Days after which a past match counts half as much (default: {DEFAULT_HALF_LIFE_DAYS})",
+                type=float,
+            ),
+            OpenApiParameter(
+                "edge",
+                description=f"Minimum edge over the devigged price (default: {DEFAULT_EDGE_THRESHOLD})",
+                type=float,
+            ),
+            OpenApiParameter(
+                "kelly",
+                description=f"Fraction of full Kelly to stake (default: {DEFAULT_KELLY_FRACTION})",
+                type=float,
+            ),
+        ],
+        responses={200: OpenApiTypes.OBJECT, 400: OpenApiTypes.OBJECT},
+    )
+    @action(detail=True, methods=["get"])
+    def forecast(self, request: Request, pk: str | None = None) -> Response:  # noqa: ARG002
+        event = self.get_object()
+        try:
+            payload = forecast_event(
+                event, half_life_days=_float_param(request, "half_life", DEFAULT_HALF_LIFE_DAYS)
+            )
+        except NotEnoughData as exc:
+            return Response({"error": str(exc)}, status=400)
+
+        prices = [
+            PricedSelection(
+                market=row.market,
+                selection=row.selection,
+                line=row.line,
+                decimal_odds=row.decimal_odds,
+                provider_espn_id=row.provider_espn_id,
+                provider_name=row.provider_name,
+            )
+            for row in event.odds.all()
+        ]
+        bets = find_value_bets(
+            payload["markets"],
+            prices,
+            edge_threshold=_float_param(request, "edge", DEFAULT_EDGE_THRESHOLD),
+            kelly_multiplier=_float_param(request, "kelly", DEFAULT_KELLY_FRACTION),
+        )
+        payload["odds_available"] = len(prices)
+        payload["value_bets"] = [bet.to_dict() for bet in bets]
+        return Response(payload)
 
 
 # ---------------------------------------------------------------------------
