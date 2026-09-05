@@ -289,6 +289,65 @@ Two things the same run showed that are worth acting on:
   a superior price, a permissive edge threshold is a machine for finding your own
   mistakes.
 
+### A second model, and the rule for promoting one
+
+`apps/espn/elo.py` adds Elo as a deliberately **independent** second opinion.
+Dixon-Coles models goals; Elo models only who is stronger. They fail differently,
+which is the whole point — a model that agreed with Dixon-Coles by construction
+could not add anything to it.
+
+Elo alone gives an expected score, not three probabilities. The rating difference
+is mapped to 1X2 through an **ordered logit** with two thresholds fitted by
+maximum likelihood, so the draw is a per-fixture estimate: tight matches get a
+higher draw probability than mismatches.
+
+```bash
+python manage.py compare_models ita.1 --refit-every 10
+```
+
+#### The promotion rule
+
+> **A model enters the betting decision only if it shows incremental information
+> over the market, out of sample.**
+
+Predicting well and being useful are different things. A model can be accurate and
+still worthless if everything it knows is already in the price. `combination.py`
+settles it with a **logarithmic opinion pool**: the market's probabilities are
+pooled with the candidate's, the weights are fitted on the earlier half of the
+matches, and the pool is scored on the later half. Read the weights directly — a
+candidate whose weight lands near zero is being told by the data that it adds
+nothing.
+
+Weights only, no per-outcome intercepts: an intercept would let the pool correct a
+global bias in the market and show an "improvement" that has nothing to do with the
+candidate's information.
+
+#### What it says today
+
+Measured on **3,734 real Serie A matches (2015–2025)**, walk-forward:
+
+| standalone | log loss | Brier |
+|---|---|---|
+| market | **0.9466** | **0.5606** |
+| Elo | 0.9729 | 0.5786 |
+| Dixon-Coles | 0.9892 | 0.5800 |
+
+Elo is the better of the two models — the simpler one wins. Both lose to the price.
+
+| incremental (1,867 held-out matches) | log loss | vs market |
+|---|---|---|
+| market alone | 0.9642 | — |
+| market + Dixon-Coles | 0.9642 | +0.0000 |
+| market + Elo | 0.9644 | −0.0003 |
+| market + both | 0.9644 | −0.0002 |
+
+**Neither adds information.** The fitted weights on the candidates come out
+*negative* (Dixon-Coles −0.09, Elo −0.28) while the market's own weight exceeds 1 —
+the pool wants to sharpen the price and subtract the models, not blend them in.
+
+Under the promotion rule, neither model is eligible for a betting decision. That is
+the correct outcome, and the reason the rule exists.
+
 #### Honest limits
 
 - A backtest on `seed_demo_data` measures **nothing** about profitability. The data

@@ -21,7 +21,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from apps.espn import markets
+from apps.espn import elo, markets
 from apps.espn.analysis import _completed_events, _sided_competitors
 from apps.espn.dixon_coles import (
     DEFAULT_HALF_LIFE_DAYS,
@@ -106,6 +106,8 @@ class ForecastRecord:
     away_goals: int
     # The market's own devigged opinion on the same fixture, when odds are stored.
     market_probabilities: dict[str, float] | None = None
+    # An independent second model, so the two can be compared and combined.
+    elo_probabilities: dict[str, float] | None = None
 
 
 @dataclass
@@ -402,6 +404,7 @@ def run(
     max_stake_fraction: float = DEFAULT_MAX_STAKE_FRACTION,
     starting_bankroll: float = 1.0,
     min_effective_matches: float = RELIABLE_MATCH_COUNT,
+    elo_config: elo.EloConfig | None = None,
 ) -> BacktestReport:
     """Replay a league's history, predicting each match from only its past.
 
@@ -429,6 +432,14 @@ def run(
     model: ModelFit | None = None
     since_refit = 0
 
+    # Elo advances incrementally alongside the replay, so its ratings are always
+    # exactly the ratings a forecaster would have held before this match. Its
+    # outcome mapping refits on the same cadence as Dixon-Coles, warm-started from
+    # the previous fit because the parameters barely move between refits.
+    elo_ratings = elo.EloRatings(config=elo_config or elo.EloConfig())
+    elo_consumed = 0
+    elo_outcome: elo.OutcomeModel | None = None
+
     for event in events:
         sides = _sided_competitors(event)
         if sides is None:
@@ -440,6 +451,9 @@ def run(
 
         while consumed < len(history) and history[consumed].date < event.date:
             consumed += 1
+        while elo_consumed < consumed:
+            elo_ratings.update(history[elo_consumed])
+            elo_consumed += 1
 
         if model is None or since_refit >= refit_every:
             if consumed < MINIMUM_MATCHES:
@@ -448,6 +462,10 @@ def run(
             model = fit(
                 history[:consumed], reference_date=event.date, half_life_days=half_life_days
             )
+            try:
+                elo_outcome = elo.fit_outcome_model(elo_ratings.samples, initial=elo_outcome)
+            except elo.NotEnoughData:
+                elo_outcome = None
             report.refits += 1
             since_refit = 0
         since_refit += 1
@@ -475,6 +493,13 @@ def run(
                 home_goals=home_goals,
                 away_goals=away_goals,
                 market_probabilities=_market_probabilities(prices),
+                elo_probabilities=(
+                    elo_outcome.probabilities(
+                        elo_ratings.scaled_difference(home.team_id, away.team_id)
+                    )
+                    if elo_outcome is not None
+                    else None
+                ),
             )
         )
 
