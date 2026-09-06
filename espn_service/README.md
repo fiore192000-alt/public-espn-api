@@ -496,11 +496,15 @@ same matches, closing beats opening by **0.00306 of log loss**, `t = +5.20`, 95%
 | League Two | 2,899 | +0.00226 | 1.87 | 1.0316 | 1.0292 |
 | National League | 2,773 | +0.00213 | 1.37 | 1.0336 | 1.0312 |
 
-A hypothesis worth recording as **not confirmed**: the opening price in the
-National League is not conspicuously worse than in the Premier League, so "less
-watched means more beatable" does not show up here. What does scale with the
-division is the **margin** — 2.31% up to 3.36%. The bookmaker charges more where it
-knows less rather than pricing worse.
+What scales cleanly with the division is the **margin** — 2.31% up to 3.36%. The
+bookmaker charges more where it knows less.
+
+This table was originally read as evidence *against* "less watched means more
+beatable", because the opening price in the National League is no further from its
+own close than the Premier League's is. That reading was wrong, and the next
+section is the correction: how much information arrives late is a different
+question from whether a model can supply information the market lacks. The second
+question needs a different instrument, and it answers the opposite way.
 
 #### Closing-line value is a valid feedback metric — measured, not assumed
 
@@ -527,6 +531,89 @@ profit on this data**. So a model that picks in advance and systematically beats
 the closing line is producing real edge, and that can be measured on a few thousand
 matches against a continuous target instead of thirty thousand against a coin flip.
 That is the feedback loop every negative result above was missing.
+
+### Does a model anticipate the closing line?
+
+`measure_clv` asks the project's question against the sharp target instead of the
+noisy one. Of the distance between the model and the opening price, how much does
+the market itself go on to travel?
+
+```
+closing − opening  =  b · (model − opening)  +  error
+```
+
+Fitted through the origin — a model that agrees with the open predicts no
+movement, and an intercept would let a general drift masquerade as insight — with
+standard errors **clustered by match**, because the three outcomes of one fixture
+move together.
+
+```bash
+python manage.py measure_clv eng.5 --refit-every 20
+```
+
+`b ≈ 0` means the market never ratifies the disagreement. `b ≈ 1` would mean the
+market ends up exactly where the model already was.
+
+#### The result, and it is a gradient
+
+| division | Dixon-Coles | t | Elo | t |
+|---|---|---|---|---|
+| Premier League | −0.0113 | −1.87 | −0.0203 | −2.64 |
+| Championship | −0.0115 | −2.90 | −0.0169 | −2.56 |
+| League One | +0.0156 | +3.17 | +0.0060 | +0.69 |
+| League Two | +0.0218 | +4.29 | +0.0370 | +5.22 |
+| National League | **+0.0259** | +4.88 | **+0.0595** | +6.15 |
+
+**Monotone in the division, for both models independently.** In the top two
+divisions the slope is *negative*: where these models disagree with Pinnacle, the
+line moves slightly further away — the disagreement is worse than useless. In the
+bottom three it turns positive and strongly significant, rising as the division
+falls. Elo in the National League: the market travels about 6% of the way to where
+Elo already was.
+
+So "less watched means more beatable" **is** visible — it just does not show up in
+how far a price moves, only in whether an outsider can say anything about where it
+is going. The earlier table in this README read the wrong instrument and reached
+the wrong conclusion.
+
+**Robustness.** A constant per-selection bias could fake this: if the model always
+over-rates draws and the market always drifts draws, a through-the-origin fit
+reads the coincidence as anticipation. Removing the mean of both axes within each
+selection destroys any such offset. The slope survives in 9 of the 10 cells, the
+exception being the one that was not significant to begin with (League One / Elo,
+`t = +0.69 → +0.56`).
+
+**Statistical power, as advertised.** On 2,729 National League matches the slope
+reaches `t = +6.15`. The profit tests earlier in this README needed 9,763 matches
+to conclude "not established". This is the same question asked of a continuous
+target instead of a coin flip.
+
+#### It is real, and it is nowhere near enough
+
+Settling the very same picks on results, flat-staked at Pinnacle's opening price:
+
+| division | model | CLV | realised yield | t |
+|---|---|---|---|---|
+| League One | Dixon-Coles | +0.27% | −2.78% | −1.30 |
+| League One | Elo | +0.18% | −7.20% | −3.13 |
+| League Two | Dixon-Coles | +0.46% | −5.29% | −2.44 |
+| League Two | Elo | +0.50% | −6.59% | −2.69 |
+| National League | Dixon-Coles | +0.74% | −4.55% | −2.00 |
+| National League | Elo | **+0.90%** | **−6.87%** | −2.73 |
+
+Positive closing-line value and a reliably losing strategy, at the same time, on
+the same bets. There is no contradiction: CLV is measured before any margin is
+paid, and **+0.90% of it does not begin to cover a 3.4% margin**. On top of that
+these models are far worse calibrated than the price they are betting into — their
+log loss is 1.06–1.16 against the market's 1.04 — so the sliver of directional
+information they own is swamped by how wrong they are about everything else.
+
+The honest summary of this whole project: after two models, a devig study, a
+microstructure study and a bias search, **one real signal has been found** — the
+models know something the market has not finished pricing in English lower
+divisions — and it is roughly an order of magnitude too small to trade. Knowing
+that costs 3,000 matches to establish rather than 30,000, which is exactly what
+the closing line was brought in to buy.
 
 ### Searching the price for a bias, and refusing to overclaim one
 

@@ -108,6 +108,14 @@ class ForecastRecord:
     market_probabilities: dict[str, float] | None = None
     # An independent second model, so the two can be compared and combined.
     elo_probabilities: dict[str, float] | None = None
+    # What the market settled on. Not a price anybody could have taken when this
+    # forecast was made — it exists only to score the forecast against, never to
+    # bet into.
+    closing_probabilities: dict[str, float] | None = None
+    # The decimal odds behind both, kept because closing-line value is a question
+    # about prices rather than probabilities.
+    opening_prices: dict[str, float] | None = None
+    closing_prices: dict[str, float] | None = None
 
 
 @dataclass
@@ -351,7 +359,56 @@ def _calibration(records: list[ForecastRecord], source: str = "probabilities") -
 # Devigging a "best price across bookmakers" line is meaningless — its overround
 # is near or below 1, so it would read as a permanent edge. A single book's own
 # quote is a coherent market with a real margin, so that is what gets devigged.
-MARKET_BENCHMARK_PROVIDERS = ("fd-b365",)
+# Pinnacle first where it is stored: its margin is roughly half Bet365's, which
+# makes it the harder and more honest benchmark. Falls back to Bet365 on leagues
+# loaded from a source that carries no Pinnacle prices.
+MARKET_BENCHMARK_PROVIDERS = ("fd-ps", "fd-b365")
+# The same two books, as the market settled rather than as it opened.
+CLOSING_BENCHMARK_PROVIDERS = ("fd-psc", "fd-b365c")
+
+
+def _complete_books(prices: list[PricedSelection]) -> dict[str, dict[str, float]]:
+    """Every provider quoting all three outcomes of the 1X2 market."""
+    by_provider: dict[str, dict[str, float]] = {}
+    for price in prices:
+        if price.market != markets.MARKET_MATCH_ODDS or price.line:
+            continue
+        by_provider.setdefault(price.provider_espn_id, {})[price.selection] = price.decimal_odds
+    return {
+        provider: quotes for provider, quotes in by_provider.items() if set(quotes) == set(OUTCOMES)
+    }
+
+
+def _book_prices(
+    prices: list[PricedSelection],
+    providers: tuple[str, ...],
+    *,
+    strict: bool = False,
+) -> dict[str, float] | None:
+    """The preferred provider's raw decimal odds for the three outcomes.
+
+    ``strict`` refuses to fall back to an unlisted provider. Closing prices are
+    read strictly: silently substituting a pre-match book for a closing one would
+    turn the whole comparison into a tautology.
+    """
+    complete = _complete_books(prices)
+    if not complete:
+        return None
+    provider = next((name for name in providers if name in complete), None)
+    if provider is None:
+        if strict:
+            return None
+        provider = next(iter(complete))
+    return complete[provider]
+
+
+def _devigged(book: dict[str, float] | None) -> dict[str, float] | None:
+    if not book:
+        return None
+    fair = remove_margin(book)
+    if set(fair) != set(OUTCOMES):
+        return None
+    return {outcome: fair[outcome] for outcome in OUTCOMES}
 
 
 def _market_probabilities(prices: list[PricedSelection]) -> dict[str, float] | None:
@@ -493,6 +550,11 @@ def run(
                 home_goals=home_goals,
                 away_goals=away_goals,
                 market_probabilities=_market_probabilities(prices),
+                closing_probabilities=_devigged(
+                    _book_prices(prices, CLOSING_BENCHMARK_PROVIDERS, strict=True)
+                ),
+                opening_prices=_book_prices(prices, MARKET_BENCHMARK_PROVIDERS),
+                closing_prices=_book_prices(prices, CLOSING_BENCHMARK_PROVIDERS, strict=True),
                 elo_probabilities=(
                     elo_outcome.probabilities(
                         elo_ratings.scaled_difference(home.team_id, away.team_id)
