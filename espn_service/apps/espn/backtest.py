@@ -21,7 +21,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from apps.espn import elo, markets
+from apps.espn import club_elo, elo, markets
 from apps.espn.analysis import _completed_events, _sided_competitors
 from apps.espn.dixon_coles import (
     DEFAULT_HALF_LIFE_DAYS,
@@ -108,6 +108,9 @@ class ForecastRecord:
     market_probabilities: dict[str, float] | None = None
     # An independent second model, so the two can be compared and combined.
     elo_probabilities: dict[str, float] | None = None
+    # A third, rated over every competition its clubs play rather than only this
+    # league — the only one that knows anything about a promoted side.
+    club_elo_probabilities: dict[str, float] | None = None
     # What the market settled on. Not a price anybody could have taken when this
     # forecast was made — it exists only to score the forecast against, never to
     # bet into.
@@ -497,6 +500,12 @@ def run(
     elo_consumed = 0
     elo_outcome: elo.OutcomeModel | None = None
 
+    # ClubElo needs no state of its own: the ratings arrive on each event, already
+    # as they stood before kick-off. Samples accumulate as the replay walks
+    # forward, so a fit never sees the match it is about to forecast.
+    club_elo_samples: list[tuple[float, str]] = []
+    club_elo_model: club_elo.ClubEloModel | None = None
+
     for event in events:
         sides = _sided_competitors(event)
         if sides is None:
@@ -523,6 +532,10 @@ def run(
                 elo_outcome = elo.fit_outcome_model(elo_ratings.samples, initial=elo_outcome)
             except elo.NotEnoughData:
                 elo_outcome = None
+            try:
+                club_elo_model = club_elo.fit(club_elo_samples, initial=club_elo_model)
+            except elo.NotEnoughData:
+                club_elo_model = None
             report.refits += 1
             since_refit = 0
         since_refit += 1
@@ -533,6 +546,7 @@ def run(
             report.skipped_unknown_team += 1
             continue
 
+        club_elo_ratings = club_elo.ratings_of(event)
         model_markets = markets.summarise(grid)
         probabilities = markets.match_odds(grid)
         # Prices are read before the reliability gate: the market comparison covers
@@ -562,8 +576,19 @@ def run(
                     if elo_outcome is not None
                     else None
                 ),
+                club_elo_probabilities=(
+                    club_elo_model.probabilities(*club_elo_ratings)
+                    if club_elo_model is not None and club_elo_ratings is not None
+                    else None
+                ),
             )
         )
+
+        # Recorded only after the forecast, so the match never trains the fit
+        # that predicted it.
+        sample = club_elo.sample_of(event, outcome_of(home_goals, away_goals))
+        if sample is not None:
+            club_elo_samples.append(sample)
 
         if model.effective_matches < min_effective_matches:
             report.skipped_unreliable_fit += 1

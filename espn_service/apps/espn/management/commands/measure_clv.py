@@ -16,6 +16,7 @@ from apps.espn.models import League
 CANDIDATES = (
     ("dixon_coles", "probabilities"),
     ("elo", "elo_probabilities"),
+    ("club_elo", "club_elo_probabilities"),
 )
 
 

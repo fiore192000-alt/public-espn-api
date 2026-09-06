@@ -350,6 +350,79 @@ the pool wants to sharpen the price and subtract the models, not blend them in.
 Under the promotion rule, neither model is eligible for a betting decision. That is
 the correct outcome, and the reason the rule exists.
 
+### A third model, and the clearest statement of the whole problem
+
+Dixon-Coles and Elo both learn a club's strength from matches **inside** the
+league being modelled. Mid-season that is fine. At the start of one it is a
+handicap, and for a promoted side it is severe.
+
+The failure is not subtle. Asked for Frosinone against Venezia on the third
+weekend of 2026/27, Dixon-Coles returned:
+
+> **Frosinone 89.8%**, expected goals **2.60 – 0.15**
+
+It had crowned a promoted club the best attack in Italy — attack rating 1.683
+against Juventus's 1.615 — on one 3-0 away win, with an **effective sample of 2.0
+matches** against roughly 14 for an established side. With a 120-day half-life and
+two years in Serie B, everything else weighed nothing.
+
+`club_elo.py` uses ratings maintained externally over **every competitive fixture
+a club plays**, so those two years in Serie B are in the number. The loader
+already stores the pre-match pair on each event; the module only maps the
+difference to 1X2, reusing the ordered logit from `elo.py` so the two rating
+sources are compared through identical arithmetic rather than two estimators.
+
+Same fixture, same day: **Frosinone 41.9%**. ClubElo has them at 1591 against
+Venezia's 1599 — eight points apart, a coin flip with a home edge.
+
+#### It is the best forecaster here
+
+On 7,730 out-of-sample Serie A matches:
+
+| | log loss | Brier |
+|---|---|---|
+| market (Bet365) | **0.9610** | 0.5716 |
+| **ClubElo** | **0.9771** | 0.5826 |
+| Elo | 0.9843 | 0.5874 |
+| Dixon-Coles | 0.9984 | 0.5913 |
+
+Paired on the same matches, ClubElo beats Elo by +0.0072 (`t = +6.42`) and
+Dixon-Coles by +0.0213 (`t = +4.77`). Both established, neither marginal.
+
+#### And it is worth nothing at all
+
+It fails both promotion gates.
+
+**Pooled with the market**, its weight is +0.089 and the holdout gets *worse*
+(−0.0003, `t = −1.03`) — less than its own shuffled forecasts manage.
+
+**Against the closing line**, on 4,424 matches where both a ClubElo rating and a
+Pinnacle close exist:
+
+| | matches | anticipation slope | t |
+|---|---|---|---|
+| eng.1 Premier League | 1,876 | −0.0174 | −2.18 |
+| eng.2 Championship | 2,548 | −0.0160 | −2.25 |
+| **pooled** | **4,424** | **−0.0166** | **−3.14** |
+
+95% interval [−0.0270, −0.0062]. Reliably **negative** — where ClubElo disagrees
+with the opening price, the line moves the other way. That is exactly where
+Dixon-Coles (−0.011, −0.012) and Elo (−0.020, −0.017) already were.
+
+**Being a materially better forecaster produced no information the price lacked.**
+Accuracy and incremental information are different things, and this is the clean
+demonstration: a model that beats another by `t = +6.42` at predicting football is
+no better at all at knowing something the market does not.
+
+**What could not be tested.** ClubElo has no ratings for League Two or the
+National League — the divisions where Dixon-Coles and Elo turned *positive*,
+reaching +0.0595 at `t = +6.15`. Zero usable matches there, so a positive result
+cannot be ruled out. Note the symmetry, though: a rating system that does not
+track those clubs cannot know anything about them either. If the only place the
+models anticipate the line is also the only place the best public rating does not
+reach, that says something about where an edge would have to live — outside the
+data everybody has.
+
 #### The gate had a hole, and a coin-flip walked through it
 
 The promotion test above compares the market alone against the market pooled with

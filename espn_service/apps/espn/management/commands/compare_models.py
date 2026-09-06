@@ -11,6 +11,7 @@ from apps.espn.models import League
 MARKET = "market"
 DIXON_COLES = "dixon_coles"
 ELO = "elo"
+CLUB_ELO = "club_elo"
 
 
 class Command(BaseCommand):
@@ -47,6 +48,11 @@ class Command(BaseCommand):
             for record in report.forecasts
             if record.market_probabilities and record.elo_probabilities
         ]
+        # ClubElo joins only where the league carries the ratings; a league loaded
+        # from a source without them still compares the other two.
+        rated = [record for record in records if record.club_elo_probabilities]
+        if rated:
+            records = rated
         if not records:
             with_odds = sum(1 for r in report.forecasts if r.market_probabilities)
             with_elo = sum(1 for r in report.forecasts if r.elo_probabilities)
@@ -67,6 +73,11 @@ class Command(BaseCommand):
                     MARKET: record.market_probabilities,
                     DIXON_COLES: record.probabilities,
                     ELO: record.elo_probabilities,
+                    **(
+                        {CLUB_ELO: record.club_elo_probabilities}
+                        if record.club_elo_probabilities
+                        else {}
+                    ),
                 },
                 actual=record.actual,
             )
@@ -76,7 +87,11 @@ class Command(BaseCommand):
         incremental = assess(
             samples,
             market=MARKET,
-            candidates=[DIXON_COLES, ELO],
+            candidates=(
+                [DIXON_COLES, ELO, CLUB_ELO]
+                if records[0].club_elo_probabilities
+                else [DIXON_COLES, ELO]
+            ),
             train_fraction=options["train_fraction"],
         )
         standalone = {
@@ -85,6 +100,11 @@ class Command(BaseCommand):
                 (MARKET, "market_probabilities"),
                 (DIXON_COLES, "probabilities"),
                 (ELO, "elo_probabilities"),
+                *(
+                    [(CLUB_ELO, "club_elo_probabilities")]
+                    if records[0].club_elo_probabilities
+                    else []
+                ),
             )
         }
 

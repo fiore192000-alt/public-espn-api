@@ -12,7 +12,7 @@ from django.core.management.base import CommandError
 
 from apps.espn import combination, elo
 from apps.espn.dixon_coles import MatchObservation
-from apps.espn.models import League
+from apps.espn.models import Event, League
 from tests.test_football_data import row as fd_row
 
 START = datetime(2024, 1, 1, tzinfo=UTC)
@@ -329,9 +329,24 @@ class TestCompareModelsCommand:
         call_command("compare_models", "ita.1", refit_every=5, json=True, stdout=out)
         payload = json.loads(out.getvalue())
 
-        assert set(payload["standalone"]) == {"market", "dixon_coles", "elo"}
+        # ClubElo joins wherever the loaded data carries the ratings, which the
+        # Club Football Match Data layout does.
+        assert set(payload["standalone"]) == {"market", "dixon_coles", "elo", "club_elo"}
         assert payload["incremental"]["market_only_log_loss"] is not None
         assert payload["matches"] > 0
+
+    def test_club_elo_is_dropped_when_the_data_carries_no_ratings(self, loaded):
+        """A league loaded from a source without ClubElo still compares the rest."""
+        Event.objects.filter(league__slug="ita.1").update(raw_data={})
+
+        out = StringIO()
+        call_command("compare_models", "ita.1", refit_every=5, json=True, stdout=out)
+
+        assert set(json.loads(out.getvalue())["standalone"]) == {
+            "market",
+            "dixon_coles",
+            "elo",
+        }
 
     def test_rejects_an_unknown_league(self, db):
         with pytest.raises(CommandError):
