@@ -21,7 +21,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from apps.espn import markets
+from apps.espn import club_elo, elo, markets
 from apps.espn.analysis import _completed_events, _sided_competitors
 from apps.espn.dixon_coles import (
     DEFAULT_HALF_LIFE_DAYS,
@@ -106,6 +106,19 @@ class ForecastRecord:
     away_goals: int
     # The market's own devigged opinion on the same fixture, when odds are stored.
     market_probabilities: dict[str, float] | None = None
+    # An independent second model, so the two can be compared and combined.
+    elo_probabilities: dict[str, float] | None = None
+    # A third, rated over every competition its clubs play rather than only this
+    # league — the only one that knows anything about a promoted side.
+    club_elo_probabilities: dict[str, float] | None = None
+    # What the market settled on. Not a price anybody could have taken when this
+    # forecast was made — it exists only to score the forecast against, never to
+    # bet into.
+    closing_probabilities: dict[str, float] | None = None
+    # The decimal odds behind both, kept because closing-line value is a question
+    # about prices rather than probabilities.
+    opening_prices: dict[str, float] | None = None
+    closing_prices: dict[str, float] | None = None
 
 
 @dataclass
@@ -347,9 +360,58 @@ def _calibration(records: list[ForecastRecord], source: str = "probabilities") -
 
 
 # Devigging a "best price across bookmakers" line is meaningless — its overround
-# is near or below 1, so it would read as a permanent edge. The consensus average
-# is the honest representation of what the market thinks.
-MARKET_BENCHMARK_PROVIDERS = ("fd-avg",)
+# is near or below 1, so it would read as a permanent edge. A single book's own
+# quote is a coherent market with a real margin, so that is what gets devigged.
+# Pinnacle first where it is stored: its margin is roughly half Bet365's, which
+# makes it the harder and more honest benchmark. Falls back to Bet365 on leagues
+# loaded from a source that carries no Pinnacle prices.
+MARKET_BENCHMARK_PROVIDERS = ("fd-ps", "fd-b365")
+# The same two books, as the market settled rather than as it opened.
+CLOSING_BENCHMARK_PROVIDERS = ("fd-psc", "fd-b365c")
+
+
+def _complete_books(prices: list[PricedSelection]) -> dict[str, dict[str, float]]:
+    """Every provider quoting all three outcomes of the 1X2 market."""
+    by_provider: dict[str, dict[str, float]] = {}
+    for price in prices:
+        if price.market != markets.MARKET_MATCH_ODDS or price.line:
+            continue
+        by_provider.setdefault(price.provider_espn_id, {})[price.selection] = price.decimal_odds
+    return {
+        provider: quotes for provider, quotes in by_provider.items() if set(quotes) == set(OUTCOMES)
+    }
+
+
+def _book_prices(
+    prices: list[PricedSelection],
+    providers: tuple[str, ...],
+    *,
+    strict: bool = False,
+) -> dict[str, float] | None:
+    """The preferred provider's raw decimal odds for the three outcomes.
+
+    ``strict`` refuses to fall back to an unlisted provider. Closing prices are
+    read strictly: silently substituting a pre-match book for a closing one would
+    turn the whole comparison into a tautology.
+    """
+    complete = _complete_books(prices)
+    if not complete:
+        return None
+    provider = next((name for name in providers if name in complete), None)
+    if provider is None:
+        if strict:
+            return None
+        provider = next(iter(complete))
+    return complete[provider]
+
+
+def _devigged(book: dict[str, float] | None) -> dict[str, float] | None:
+    if not book:
+        return None
+    fair = remove_margin(book)
+    if set(fair) != set(OUTCOMES):
+        return None
+    return {outcome: fair[outcome] for outcome in OUTCOMES}
 
 
 def _market_probabilities(prices: list[PricedSelection]) -> dict[str, float] | None:
@@ -402,6 +464,7 @@ def run(
     max_stake_fraction: float = DEFAULT_MAX_STAKE_FRACTION,
     starting_bankroll: float = 1.0,
     min_effective_matches: float = RELIABLE_MATCH_COUNT,
+    elo_config: elo.EloConfig | None = None,
 ) -> BacktestReport:
     """Replay a league's history, predicting each match from only its past.
 
@@ -429,6 +492,20 @@ def run(
     model: ModelFit | None = None
     since_refit = 0
 
+    # Elo advances incrementally alongside the replay, so its ratings are always
+    # exactly the ratings a forecaster would have held before this match. Its
+    # outcome mapping refits on the same cadence as Dixon-Coles, warm-started from
+    # the previous fit because the parameters barely move between refits.
+    elo_ratings = elo.EloRatings(config=elo_config or elo.EloConfig())
+    elo_consumed = 0
+    elo_outcome: elo.OutcomeModel | None = None
+
+    # ClubElo needs no state of its own: the ratings arrive on each event, already
+    # as they stood before kick-off. Samples accumulate as the replay walks
+    # forward, so a fit never sees the match it is about to forecast.
+    club_elo_samples: list[tuple[float, str]] = []
+    club_elo_model: club_elo.ClubEloModel | None = None
+
     for event in events:
         sides = _sided_competitors(event)
         if sides is None:
@@ -440,6 +517,9 @@ def run(
 
         while consumed < len(history) and history[consumed].date < event.date:
             consumed += 1
+        while elo_consumed < consumed:
+            elo_ratings.update(history[elo_consumed])
+            elo_consumed += 1
 
         if model is None or since_refit >= refit_every:
             if consumed < MINIMUM_MATCHES:
@@ -448,6 +528,14 @@ def run(
             model = fit(
                 history[:consumed], reference_date=event.date, half_life_days=half_life_days
             )
+            try:
+                elo_outcome = elo.fit_outcome_model(elo_ratings.samples, initial=elo_outcome)
+            except elo.NotEnoughData:
+                elo_outcome = None
+            try:
+                club_elo_model = club_elo.fit(club_elo_samples, initial=club_elo_model)
+            except elo.NotEnoughData:
+                club_elo_model = None
             report.refits += 1
             since_refit = 0
         since_refit += 1
@@ -458,6 +546,7 @@ def run(
             report.skipped_unknown_team += 1
             continue
 
+        club_elo_ratings = club_elo.ratings_of(event)
         model_markets = markets.summarise(grid)
         probabilities = markets.match_odds(grid)
         # Prices are read before the reliability gate: the market comparison covers
@@ -475,8 +564,31 @@ def run(
                 home_goals=home_goals,
                 away_goals=away_goals,
                 market_probabilities=_market_probabilities(prices),
+                closing_probabilities=_devigged(
+                    _book_prices(prices, CLOSING_BENCHMARK_PROVIDERS, strict=True)
+                ),
+                opening_prices=_book_prices(prices, MARKET_BENCHMARK_PROVIDERS),
+                closing_prices=_book_prices(prices, CLOSING_BENCHMARK_PROVIDERS, strict=True),
+                elo_probabilities=(
+                    elo_outcome.probabilities(
+                        elo_ratings.scaled_difference(home.team_id, away.team_id)
+                    )
+                    if elo_outcome is not None
+                    else None
+                ),
+                club_elo_probabilities=(
+                    club_elo_model.probabilities(*club_elo_ratings)
+                    if club_elo_model is not None and club_elo_ratings is not None
+                    else None
+                ),
             )
         )
+
+        # Recorded only after the forecast, so the match never trains the fit
+        # that predicted it.
+        sample = club_elo.sample_of(event, outcome_of(home_goals, away_goals))
+        if sample is not None:
+            club_elo_samples.append(sample)
 
         if model.effective_matches < min_effective_matches:
             report.skipped_unreliable_fit += 1

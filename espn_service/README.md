@@ -217,10 +217,12 @@ python manage.py ingest_football_data Matches.csv --division I1 --date-from 2015
 Division codes map onto ESPN-style league slugs (`I1` → `ita.1`, `E0` → `eng.1`,
 `SP1` → `esp.1`, …), so a league loaded this way sits alongside anything ingested
 from ESPN and works with every command above. Odds are stored as two providers:
-`fd-avg` (market average) and `fd-max` (best price across bookmakers).
+`fd-b365` (Bet365's own price) and `fd-max` (best price across ~17 books).
 
 The dataset is **not** committed to this repository — download it separately. Note
-that these are pre-match average and maximum prices, **not** closing odds.
+that these are Bet365's pre-match price and a best-of-~17 maximum, **not** closing
+odds; for those, load the original football-data.co.uk season files instead — see
+below.
 
 ### Backtesting
 
@@ -289,6 +291,256 @@ Two things the same run showed that are worth acting on:
   a superior price, a permissive edge threshold is a machine for finding your own
   mistakes.
 
+### A second model, and the rule for promoting one
+
+`apps/espn/elo.py` adds Elo as a deliberately **independent** second opinion.
+Dixon-Coles models goals; Elo models only who is stronger. They fail differently,
+which is the whole point — a model that agreed with Dixon-Coles by construction
+could not add anything to it.
+
+Elo alone gives an expected score, not three probabilities. The rating difference
+is mapped to 1X2 through an **ordered logit** with two thresholds fitted by
+maximum likelihood, so the draw is a per-fixture estimate: tight matches get a
+higher draw probability than mismatches.
+
+```bash
+python manage.py compare_models ita.1 --refit-every 10
+```
+
+#### The promotion rule
+
+> **A model enters the betting decision only if it shows incremental information
+> over the market, out of sample.**
+
+Predicting well and being useful are different things. A model can be accurate and
+still worthless if everything it knows is already in the price. `combination.py`
+settles it with a **logarithmic opinion pool**: the market's probabilities are
+pooled with the candidate's, the weights are fitted on the earlier half of the
+matches, and the pool is scored on the later half. Read the weights directly — a
+candidate whose weight lands near zero is being told by the data that it adds
+nothing.
+
+Weights only, no per-outcome intercepts: an intercept would let the pool correct a
+global bias in the market and show an "improvement" that has nothing to do with the
+candidate's information.
+
+#### What it says today
+
+Measured on **3,734 real Serie A matches (2015–2025)**, walk-forward:
+
+| standalone | log loss | Brier |
+|---|---|---|
+| market | **0.9466** | **0.5606** |
+| Elo | 0.9729 | 0.5786 |
+| Dixon-Coles | 0.9892 | 0.5800 |
+
+Elo is the better of the two models — the simpler one wins. Both lose to the price.
+
+| incremental (1,867 held-out matches) | log loss | vs market |
+|---|---|---|
+| market alone | 0.9642 | — |
+| market + Dixon-Coles | 0.9642 | +0.0000 |
+| market + Elo | 0.9644 | −0.0003 |
+| market + both | 0.9644 | −0.0002 |
+
+**Neither adds information.** The fitted weights on the candidates come out
+*negative* (Dixon-Coles −0.09, Elo −0.28) while the market's own weight exceeds 1 —
+the pool wants to sharpen the price and subtract the models, not blend them in.
+
+Under the promotion rule, neither model is eligible for a betting decision. That is
+the correct outcome, and the reason the rule exists.
+
+### A third model, and the clearest statement of the whole problem
+
+Dixon-Coles and Elo both learn a club's strength from matches **inside** the
+league being modelled. Mid-season that is fine. At the start of one it is a
+handicap, and for a promoted side it is severe.
+
+The failure is not subtle. Asked for Frosinone against Venezia on the third
+weekend of 2026/27, Dixon-Coles returned:
+
+> **Frosinone 89.8%**, expected goals **2.60 – 0.15**
+
+It had crowned a promoted club the best attack in Italy — attack rating 1.683
+against Juventus's 1.615 — on one 3-0 away win, with an **effective sample of 2.0
+matches** against roughly 14 for an established side. With a 120-day half-life and
+two years in Serie B, everything else weighed nothing.
+
+`club_elo.py` uses ratings maintained externally over **every competitive fixture
+a club plays**, so those two years in Serie B are in the number. The loader
+already stores the pre-match pair on each event; the module only maps the
+difference to 1X2, reusing the ordered logit from `elo.py` so the two rating
+sources are compared through identical arithmetic rather than two estimators.
+
+Same fixture, same day: **Frosinone 41.9%**. ClubElo has them at 1591 against
+Venezia's 1599 — eight points apart, a coin flip with a home edge.
+
+#### It is the best forecaster here
+
+On 7,730 out-of-sample Serie A matches:
+
+| | log loss | Brier |
+|---|---|---|
+| market (Bet365) | **0.9610** | 0.5716 |
+| **ClubElo** | **0.9771** | 0.5826 |
+| Elo | 0.9843 | 0.5874 |
+| Dixon-Coles | 0.9984 | 0.5913 |
+
+Paired on the same matches, ClubElo beats Elo by +0.0072 (`t = +6.42`) and
+Dixon-Coles by +0.0213 (`t = +4.77`). Both established, neither marginal.
+
+#### And it is worth nothing at all
+
+It fails both promotion gates.
+
+**Pooled with the market**, its weight is +0.089 and the holdout gets *worse*
+(−0.0003, `t = −1.03`) — less than its own shuffled forecasts manage.
+
+**Against the closing line**, on 4,424 matches where both a ClubElo rating and a
+Pinnacle close exist:
+
+| | matches | anticipation slope | t |
+|---|---|---|---|
+| eng.1 Premier League | 1,876 | −0.0174 | −2.18 |
+| eng.2 Championship | 2,548 | −0.0160 | −2.25 |
+| **pooled** | **4,424** | **−0.0166** | **−3.14** |
+
+95% interval [−0.0270, −0.0062]. Reliably **negative** — where ClubElo disagrees
+with the opening price, the line moves the other way. That is exactly where
+Dixon-Coles (−0.011, −0.012) and Elo (−0.020, −0.017) already were.
+
+**Being a materially better forecaster produced no information the price lacked.**
+Accuracy and incremental information are different things, and this is the clean
+demonstration: a model that beats another by `t = +6.42` at predicting football is
+no better at all at knowing something the market does not.
+
+**What could not be tested.** ClubElo has no ratings for League Two or the
+National League — the divisions where Dixon-Coles and Elo turned *positive*,
+reaching +0.0595 at `t = +6.15`. Zero usable matches there, so a positive result
+cannot be ruled out. Note the symmetry, though: a rating system that does not
+track those clubs cannot know anything about them either. If the only place the
+models anticipate the line is also the only place the best public rating does not
+reach, that says something about where an edge would have to live — outside the
+data everybody has.
+
+#### The gate had a hole, and a coin-flip walked through it
+
+The promotion test above compares the market alone against the market pooled with
+a candidate. It had no null control, and that turns out to matter more than the
+threshold it did have.
+
+Fed a candidate built from **pure noise**, the pool improved the holdout by
++0.0001 with `t = +3.14`. A source that knows nothing cannot add information, so
+the verdict was the machinery's, not the data's.
+
+The mechanism is visible in the weights. Fitting the market *alone* gives it a
+weight of **1.0863**, not 1.0 — the pool sharpens the price. Add any second
+source and it becomes a second knob on that same temperature adjustment, worth a
+little log loss whatever the source contains. Elo's fitted weight of −0.063 is
+not Elo contributing; it is the pool asking for slightly different sharpening.
+
+Three checks now stand between a candidate and a verdict:
+
+1. **A permutation null.** The same candidate's forecasts, reattached to the wrong
+   matches. Same distribution, same confidence, no link to any outcome — so
+   whatever it still gains is the floor a real candidate has to clear.
+2. **A paired standard error.** `assess` reported a point estimate and nothing
+   else; it now carries a per-match standard error and a 95% interval.
+3. **Split stability**, checked by hand and reported below, because a single
+   train/test boundary can be lucky.
+
+On real Serie A this changes a verdict:
+
+| candidate | improvement | t | 95% interval | shuffled null |
+|---|---|---|---|---|
+| market + Dixon-Coles | +0.0000 | +1.40 | [−0.0000, +0.0000] | +0.0004 |
+| market + Elo | +0.0003 | **+2.03** | [+0.0000, +0.0005] | **+0.0004** |
+| market + both | +0.0002 | +1.51 | [−0.0001, +0.0005] | +0.0003 |
+
+Elo clears two standard errors. It is still refused, because **its own shuffled
+forecasts do better**. Significance alone would have promoted it.
+
+The split-stability check is worth recording too. Pooling all three candidates,
+the improvement runs −0.0003 → +0.0010 → +0.0033 as the training share goes from
+40% to 50% to 70%, flipping sign and reaching `t = +3.96` at the far end. An
+effect that grows monotonically with how much data the weights are fitted on is a
+description of the fitting, not of the football.
+
+**None of this changes the project's conclusions** — every candidate was refused
+before and is refused now, and the negative results are better supported than
+they were. What changed is that the gate can no longer be walked through by
+something that knows nothing.
+
+### Removing the bookmaker's margin
+
+A quoted book always implies more than 100%. Recovering what it actually believes
+means deciding *how* that excess sits across the selections — and the choice is not
+cosmetic: it moves a longshot's implied probability far more than a favourite's,
+which is exactly where a model tends to disagree with the price.
+
+```bash
+python manage.py measure_devig ita.1
+```
+
+Three methods, scored against real results rather than assumed:
+
+| method | log loss | Brier |
+|---|---|---|
+| power | **0.9456** | **0.5603** |
+| Shin | 0.9459 | 0.5605 |
+| proportional | 0.9470 | 0.5611 |
+
+*(Bet365's 1X2 book, 3,799 Serie A matches.)*
+
+Paired tests settle it: proportional is worse than both by a distinguishable margin
+(t = −3.6 against Shin, −3.2 against power), while **Shin and power cannot be told
+apart** (t = −1.9). The default is Shin — it wins the tie on grounds the data cannot
+settle, by modelling *why* the margin sits where it does rather than fitting an
+exponent that makes the book add up.
+
+Switching off proportional makes the market benchmark **sharper**, which is the
+honest direction: the wall the models have to clear gets higher, not lower.
+
+### What the market's structure actually says
+
+The same command reports the microstructure, and this is the most useful number in
+the project so far:
+
+| | |
+|---|---|
+| Bet365 overround | 1.0490 (**4.67%** margin) |
+| Best price across ~17 books | **1.0003** |
+| Best price vs Bet365, best leg | **+9.82%** |
+
+That near-1.0 overround looks like it removes the entire margin. **It does not**,
+and the difference matters enough to measure directly rather than infer.
+
+Flat-staking every selection and settling on real results, over 3,799 matches:
+
+| | at Bet365 | at best price | recovered |
+|---|---|---|---|
+| home | −11.56% | −7.42% | +4.14pp |
+| draw | −4.18% | +1.25% | +5.42pp |
+| away | −8.63% | −2.27% | +6.36pp |
+| **pooled** | **−8.12%** | **−2.81%** | **+5.31pp** |
+
+Price selection is worth **5.3 percentage points of yield** — large, real, and it
+requires predicting nothing. But two things must be said plainly:
+
+- **It does not make you profitable.** At the best price the yield is still −2.81%,
+  with a standard error of 0.91% over 3,799 matches: reliably losing, not merely
+  unproven. Line shopping is what makes a genuine edge survivable; it is not a
+  substitute for having one.
+- **The overround overstates it by 2.8 percentage points.** An overround of 1.0003
+  implies backing all three outcomes returns −0.03%; it actually returned −2.81%.
+  Three maxima taken across different books are not one coherent book — the best
+  price tends to be highest on the outcomes that go on to lose. The realised figure
+  is the trustworthy one.
+
+The pooled figure is accumulated **per match, not per leg**: the three outcomes of
+one match are a single dependent event, so treating them as three independent bets
+misstates the spread.
+
 #### Honest limits
 
 - A backtest on `seed_demo_data` measures **nothing** about profitability. The data
@@ -314,6 +566,248 @@ python manage.py backtest_model demo.1 --refit-every 5
 python manage.py seed_demo_data --rounds 60 --with-odds --odds-bias 0.12
 python manage.py backtest_model demo.1 --refit-every 5
 ```
+
+### Closing odds, and why they change the question
+
+Every verdict above is measured against a **pre-match** price. That is the noisier
+of the two benchmarks available, and it flatters the models. The original
+Football-Data.co.uk season files also carry **closing** prices — a bookmaker
+abbreviation followed by `C`, so `PSCH` is Pinnacle's closing home price — and
+`ingest_football_data` now reads that layout as well as the derived mirror,
+detecting which one it is looking at from the header.
+
+```bash
+# The original football-data.co.uk season files, which carry closing prices
+python manage.py ingest_football_data "2018-2019/Premier.csv" --division E0
+
+# The derived Club Football Match Data mirror, which does not
+python manage.py ingest_football_data Matches.csv --division I1
+```
+
+Opening and closing quotes are stored as **separate providers** (`fd-ps` and
+`fd-psc`), never as two rows of one provider. The Odds model has no notion of when
+a price was taken, and every analysis here keys on the provider — so keeping them
+apart is what stops a closing line being devigged or settled as if it were a price
+anybody could have taken when the forecast was made.
+
+| provider | what it is |
+|---|---|
+| `fd-b365` / `fd-b365c` | Bet365, pre-match / closing |
+| `fd-ps` / `fd-psc` | **Pinnacle**, pre-match / closing |
+| `fd-avg` / `fd-avgc` | Market average |
+| `fd-max` / `fd-maxc` | Best price across ~17 books (never a coherent book) |
+
+#### What 13,657 matches with both prices say
+
+English football, 2015/16–2020/21, Premier League down to the National League.
+
+**Pinnacle's margin is less than half of Bet365's.** Overround 1.0297 against
+Bet365's 1.0403 here, and 1.0490 on the Serie A data. The wall every model in this
+project has been failing to clear was the *soft* one.
+
+**The closing line is sharper than the opening line, beyond doubt.** Paired on the
+same matches, closing beats opening by **0.00306 of log loss**, `t = +5.20`, 95% CI
+[+0.0019, +0.0042].
+
+| division | matches | close beats open by | t | open overround | close overround |
+|---|---|---|---|---|---|
+| Premier League | 2,084 | +0.00250 | 1.69 | 1.0231 | 1.0228 |
+| Championship | 3,048 | +0.00306 | 2.77 | 1.0270 | 1.0250 |
+| League One | 2,853 | +0.00521 | 4.10 | 1.0316 | 1.0293 |
+| League Two | 2,899 | +0.00226 | 1.87 | 1.0316 | 1.0292 |
+| National League | 2,773 | +0.00213 | 1.37 | 1.0336 | 1.0312 |
+
+What scales cleanly with the division is the **margin** — 2.31% up to 3.36%. The
+bookmaker charges more where it knows less.
+
+This table was originally read as evidence *against* "less watched means more
+beatable", because the opening price in the National League is no further from its
+own close than the Premier League's is. That reading was wrong, and the next
+section is the correction: how much information arrives late is a different
+question from whether a model can supply information the market lacks. The second
+question needs a different instrument, and it answers the opposite way.
+
+#### Closing-line value is a valid feedback metric — measured, not assumed
+
+Taking the opening price only on selections that went on to shorten by the close:
+
+| beat the close by | matches | yield | t |
+|---|---|---|---|
+| any amount | 13,447 | +2.45% | +2.34 |
+| ≥ 1% | 12,645 | +2.21% | +1.92 |
+| ≥ 2% | 11,160 | +3.22% | +2.47 |
+| ≥ 3% | 9,490 | +4.61% | +3.12 |
+| ≥ 5% | 6,619 | **+7.96%** | +4.15 |
+
+Profitable at Pinnacle's own opening price, margin included, and rising with the
+size of the beat. (The 1% row dipping below the 0% row is noise, not a pattern.)
+
+**This is not a strategy, and reading it as one is the trap.** Selecting bets by
+whether they beat the close requires knowing the close — which exists only after
+the moment you would have had to bet. It is pure hindsight, the same error as
+devigging a best-price line.
+
+What it does establish is the thing worth having: **beating the close predicts
+profit on this data**. So a model that picks in advance and systematically beats
+the closing line is producing real edge, and that can be measured on a few thousand
+matches against a continuous target instead of thirty thousand against a coin flip.
+That is the feedback loop every negative result above was missing.
+
+### Does a model anticipate the closing line?
+
+`measure_clv` asks the project's question against the sharp target instead of the
+noisy one. Of the distance between the model and the opening price, how much does
+the market itself go on to travel?
+
+```
+closing − opening  =  b · (model − opening)  +  error
+```
+
+Fitted through the origin — a model that agrees with the open predicts no
+movement, and an intercept would let a general drift masquerade as insight — with
+standard errors **clustered by match**, because the three outcomes of one fixture
+move together.
+
+```bash
+python manage.py measure_clv eng.5 --refit-every 20
+```
+
+`b ≈ 0` means the market never ratifies the disagreement. `b ≈ 1` would mean the
+market ends up exactly where the model already was.
+
+#### The result, and it is a gradient
+
+| division | Dixon-Coles | t | Elo | t |
+|---|---|---|---|---|
+| Premier League | −0.0113 | −1.87 | −0.0203 | −2.64 |
+| Championship | −0.0115 | −2.90 | −0.0169 | −2.56 |
+| League One | +0.0156 | +3.17 | +0.0060 | +0.69 |
+| League Two | +0.0218 | +4.29 | +0.0370 | +5.22 |
+| National League | **+0.0259** | +4.88 | **+0.0595** | +6.15 |
+
+**Monotone in the division, for both models independently.** In the top two
+divisions the slope is *negative*: where these models disagree with Pinnacle, the
+line moves slightly further away — the disagreement is worse than useless. In the
+bottom three it turns positive and strongly significant, rising as the division
+falls. Elo in the National League: the market travels about 6% of the way to where
+Elo already was.
+
+So "less watched means more beatable" **is** visible — it just does not show up in
+how far a price moves, only in whether an outsider can say anything about where it
+is going. The earlier table in this README read the wrong instrument and reached
+the wrong conclusion.
+
+**Robustness.** A constant per-selection bias could fake this: if the model always
+over-rates draws and the market always drifts draws, a through-the-origin fit
+reads the coincidence as anticipation. Removing the mean of both axes within each
+selection destroys any such offset. The slope survives in 9 of the 10 cells, the
+exception being the one that was not significant to begin with (League One / Elo,
+`t = +0.69 → +0.56`).
+
+**Statistical power, as advertised.** On 2,729 National League matches the slope
+reaches `t = +6.15`. The profit tests earlier in this README needed 9,763 matches
+to conclude "not established". This is the same question asked of a continuous
+target instead of a coin flip.
+
+#### It is real, and it is nowhere near enough
+
+Settling the very same picks on results, flat-staked at Pinnacle's opening price:
+
+| division | model | CLV | realised yield | t |
+|---|---|---|---|---|
+| League One | Dixon-Coles | +0.27% | −2.78% | −1.30 |
+| League One | Elo | +0.18% | −7.20% | −3.13 |
+| League Two | Dixon-Coles | +0.46% | −5.29% | −2.44 |
+| League Two | Elo | +0.50% | −6.59% | −2.69 |
+| National League | Dixon-Coles | +0.74% | −4.55% | −2.00 |
+| National League | Elo | **+0.90%** | **−6.87%** | −2.73 |
+
+Positive closing-line value and a reliably losing strategy, at the same time, on
+the same bets. There is no contradiction: CLV is measured before any margin is
+paid, and **+0.90% of it does not begin to cover a 3.4% margin**. On top of that
+these models are far worse calibrated than the price they are betting into — their
+log loss is 1.06–1.16 against the market's 1.04 — so the sliver of directional
+information they own is swamped by how wrong they are about everything else.
+
+The honest summary of this whole project: after two models, a devig study, a
+microstructure study and a bias search, **one real signal has been found** — the
+models know something the market has not finished pricing in English lower
+divisions — and it is roughly an order of magnitude too small to trade. Knowing
+that costs 3,000 matches to establish rather than 30,000, which is exactly what
+the closing line was brought in to buy.
+
+### Searching the price for a bias, and refusing to overclaim one
+
+`find_market_bias` runs the search everybody runs — is some band of prices, or some
+outcome, systematically wrong? — and then applies the gates that decide whether the
+answer means anything. The gates are the point. A search over enough rules always
+produces a winner, and a rule that won a search is not evidence.
+
+```bash
+python manage.py find_market_bias ita.1 --split-year 2019
+python manage.py find_market_bias ita.1 --validate-on eng.1 esp.1 --json
+```
+
+Five gates, in the order they bite:
+
+1. **Discovery and validation are separated.** Rules are ranked on Serie A before
+   2019 only, then re-measured on Serie A from 2019 and on four leagues the search
+   never read.
+2. **The search burden is stated.** Every eligible rule is counted, along with how
+   many would clear `|t| ≥ 2` on pure noise.
+3. **Effects are measured in money.** A calibration gap is not an edge until it
+   clears the margin, so every rule is settled as real flat-staked bets.
+4. **Consistency is required.** Each validation set is reported separately, so a
+   rule that pools positive because one set carries it is visible as such.
+5. **Price selection is separated from the bias.** Every rule is settled twice, at
+   one bookmaker and at the best price. Line shopping recovers margin on *any*
+   selection, so an edge that exists only at the best price is a discount on the
+   fee, not a mispricing.
+
+Bets are pooled **per match, not per leg** — a rule that fires on two outcomes of
+one fixture has one dependent result, not two independent ones.
+
+#### What it finds on 35,883 real matches
+
+The market is not perfectly calibrated. Over the Serie A discovery period, short
+prices come in slightly more often than they imply and long prices slightly less —
+the classic favourite–longshot bias:
+
+| odds | legs | market implies | actually happens | gap |
+|---|---|---|---|---|
+| 1.00–1.50 | 938 | 0.7362 | 0.7623 | **+0.0261** |
+| 1.50–2.00 | 1,812 | 0.5596 | 0.5822 | **+0.0226** |
+| 2.00–3.00 | 3,223 | 0.3952 | 0.4083 | +0.0171 |
+| 3.00–4.00 | 5,302 | 0.2809 | 0.2697 | −0.0106 |
+| 4.00–6.00 | 2,390 | 0.1992 | 0.1862 | −0.0134 |
+| 6.00–10.00 | 1,237 | 0.1236 | 0.1188 | −0.0043 |
+| 10.00+ | 473 | 0.0610 | 0.0359 | **−0.0247** |
+
+The best rule the search found — back anything priced 1.50–2.00, at the best
+available price — returned **+4.97%** over the discovery period, `t = +2.42`. With
+20 eligible hypotheses, **about 1 was expected to clear `|t| ≥ 2` by chance alone.**
+
+Then the gates:
+
+| validation set | matches | yield | t |
+|---|---|---|---|
+| ita.1 2019+ | 886 | +6.22% | +2.17 |
+| eng.1 (all years) | 2,473 | +3.20% | +1.87 |
+| esp.1 (all years) | 2,215 | +1.37% | +0.75 |
+| fra.1 (all years) | 2,234 | −0.94% | −0.51 |
+| ger.1 (all years) | 1,955 | −3.51% | −1.80 |
+| **pooled** | **9,763** | **+0.77%** | 95% CI **[−0.93%, +2.48%]** |
+
+**Not established**, on three counts: the interval contains zero, only 3 of 5 sets
+are positive, and the same rule at a single bookmaker returns **−3.75%** — the
+entire positive figure is the +4.52pp that price selection recovers, not the bias.
+
+The favourite–longshot bias is real and visible. It is also smaller than the margin,
+which is presumably why the bookmaker leaves it there.
+
+The gates are tested in both directions: a fabricated market where a 1.80 shot wins
+70% of the time comes back `ESTABLISHED`, and a fairly priced one comes back empty.
+A search that can only ever say "no edge" is a slogan, not a search.
 
 ---
 
@@ -469,6 +963,9 @@ python manage.py ingest_all_teams --dry-run
 # Analyse the next scheduled fixtures (or add --event <espn_id> for one match)
 python manage.py analyze_match --league nba --upcoming 3
 python manage.py analyze_match --event 401584666 --json
+
+# Search the market for a price bias, with the out-of-sample gates applied
+python manage.py find_market_bias ita.1 --split-year 2019
 ```
 
 ### Running without ESPN access

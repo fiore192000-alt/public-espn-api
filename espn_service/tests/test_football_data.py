@@ -12,6 +12,7 @@ from apps.espn import backtest
 from apps.espn.backtest import ForecastRecord, _market_probabilities
 from apps.espn.models import Competitor, Event, League, Odds, Team
 from apps.espn.value import PricedSelection
+from apps.ingest.management.commands.ingest_football_data import detect_schema
 
 HEADER = (
     "Division,MatchDate,MatchTime,HomeTeam,AwayTeam,HomeElo,AwayElo,"
@@ -116,7 +117,7 @@ class TestFootballDataLoader:
         event = Event.objects.get()
         average = {
             o.selection: o.decimal_odds
-            for o in event.odds.filter(provider_espn_id="fd-avg", market="1x2")
+            for o in event.odds.filter(provider_espn_id="fd-b365", market="1x2")
         }
         maximum = {
             o.selection: o.decimal_odds
@@ -182,7 +183,7 @@ class TestFootballDataLoader:
 
     def test_unusable_prices_are_dropped(self, csv_file):
         load(csv_file([row(odds=("0.5", "", "abc"))]), division="I1")
-        assert not Odds.objects.filter(provider_espn_id="fd-avg", market="1x2").exists()
+        assert not Odds.objects.filter(provider_espn_id="fd-b365", market="1x2").exists()
 
     def test_unknown_division_gets_a_generated_slug(self, csv_file):
         load(csv_file([row(division="ZZ9")]), division="ZZ9")
@@ -204,9 +205,9 @@ class TestFootballDataLoader:
 class TestMarketProbabilities:
     def test_devigs_the_average_provider(self):
         prices = [
-            PricedSelection("1x2", "home", "", 2.0, "fd-avg"),
-            PricedSelection("1x2", "draw", "", 4.0, "fd-avg"),
-            PricedSelection("1x2", "away", "", 4.0, "fd-avg"),
+            PricedSelection("1x2", "home", "", 2.0, "fd-b365"),
+            PricedSelection("1x2", "draw", "", 4.0, "fd-b365"),
+            PricedSelection("1x2", "away", "", 4.0, "fd-b365"),
         ]
         probabilities = _market_probabilities(prices)
 
@@ -215,9 +216,9 @@ class TestMarketProbabilities:
 
     def test_prefers_the_average_over_the_maximum(self):
         prices = [
-            PricedSelection("1x2", "home", "", 2.0, "fd-avg"),
-            PricedSelection("1x2", "draw", "", 4.0, "fd-avg"),
-            PricedSelection("1x2", "away", "", 4.0, "fd-avg"),
+            PricedSelection("1x2", "home", "", 2.0, "fd-b365"),
+            PricedSelection("1x2", "draw", "", 4.0, "fd-b365"),
+            PricedSelection("1x2", "away", "", 4.0, "fd-b365"),
             PricedSelection("1x2", "home", "", 2.6, "fd-max"),
             PricedSelection("1x2", "draw", "", 4.4, "fd-max"),
             PricedSelection("1x2", "away", "", 4.4, "fd-max"),
@@ -227,15 +228,15 @@ class TestMarketProbabilities:
 
     def test_incomplete_market_is_ignored(self):
         prices = [
-            PricedSelection("1x2", "home", "", 2.0, "fd-avg"),
-            PricedSelection("1x2", "draw", "", 4.0, "fd-avg"),
+            PricedSelection("1x2", "home", "", 2.0, "fd-b365"),
+            PricedSelection("1x2", "draw", "", 4.0, "fd-b365"),
         ]
         assert _market_probabilities(prices) is None
 
     def test_totals_do_not_stand_in_for_match_odds(self):
         prices = [
-            PricedSelection("totals", "over", "2.5", 1.9, "fd-avg"),
-            PricedSelection("totals", "under", "2.5", 1.9, "fd-avg"),
+            PricedSelection("totals", "over", "2.5", 1.9, "fd-b365"),
+            PricedSelection("totals", "under", "2.5", 1.9, "fd-b365"),
         ]
         assert _market_probabilities(prices) is None
 
@@ -349,3 +350,302 @@ class TestBacktestAgainstRealShapedData:
 
         assert "market" in payload
         assert payload["market"]["matches"] > 0
+
+
+# --- the original football-data.co.uk layout -------------------------------------
+#
+# The columns that matter here are the closing ones: a bookmaker abbreviation
+# followed by C. They are the only prices in this project that let a bet be
+# judged against the line it was struck at rather than against the result.
+
+UK_HEADER = (
+    "Div,Date,Time,HomeTeam,AwayTeam,FTHG,FTAG,FTR,HTHG,HTAG,HTR,Referee,"
+    "HS,AS,HST,AST,HF,AF,HC,AC,HY,AY,HR,AR,"
+    "B365H,B365D,B365A,PSH,PSD,PSA,MaxH,MaxD,MaxA,AvgH,AvgD,AvgA,"
+    "B365CH,B365CD,B365CA,PSCH,PSCD,PSCA,MaxCH,MaxCD,MaxCA,AvgCH,AvgCD,AvgCA,"
+    "B365>2.5,B365<2.5,PC>2.5,PC<2.5"
+)
+
+# The pre-2019 layout: no closing prices at all, and the aggregates are Betbrain's.
+UK_HEADER_OLD = (
+    "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR,HTHG,HTAG,HTR,Referee,"
+    "HS,AS,HST,AST,HF,AF,HC,AC,HY,AY,HR,AR,"
+    "B365H,B365D,B365A,PSH,PSD,PSA,BbMxH,BbAvH,BbMxD,BbAvD,BbMxA,BbAvA"
+)
+
+
+def uk_row(
+    *,
+    division="E0",
+    date="10/08/2018",
+    time="20:00",
+    home="Man United",
+    away="Leicester",
+    home_goals="2",
+    away_goals="1",
+    opening=("1.58", "3.93", "7.50"),
+    closing=("1.55", "4.07", "7.69"),
+) -> str:
+    result = (
+        "H"
+        if int(home_goals) > int(away_goals)
+        else "A"
+        if int(away_goals) > int(home_goals)
+        else "D"
+    )
+    return ",".join(
+        [
+            division,
+            date,
+            time,
+            home,
+            away,
+            home_goals,
+            away_goals,
+            result,
+            "1",
+            "0",
+            "H",
+            "A Marriner",
+            "8",
+            "13",
+            "6",
+            "4",
+            "11",
+            "8",
+            "2",
+            "5",
+            "2",
+            "1",
+            "0",
+            "0",
+            "1.57",
+            "3.90",
+            "7.50",  # B365 pre-match
+            *opening,  # PS pre-match
+            "1.60",
+            "4.20",
+            "8.05",  # Max pre-match
+            "1.56",
+            "3.92",
+            "7.06",  # Avg pre-match
+            "1.55",
+            "4.00",
+            "7.60",  # B365 closing
+            *closing,  # PS closing
+            "1.58",
+            "4.20",
+            "8.10",  # Max closing
+            "1.54",
+            "4.05",
+            "7.40",  # Avg closing
+            "1.80",
+            "2.05",  # B365 over/under 2.5
+            "1.85",
+            "2.10",  # Pinnacle closing over/under 2.5
+        ]
+    )
+
+
+def uk_old_row(*, division="E0", date="17/08/13", home="Arsenal", away="Villa") -> str:
+    return ",".join(
+        [
+            division,
+            date,
+            home,
+            away,
+            "1",
+            "3",
+            "A",
+            "1",
+            "1",
+            "D",
+            "A Taylor",
+            "20",
+            "8",
+            "6",
+            "4",
+            "12",
+            "9",
+            "9",
+            "2",
+            "1",
+            "2",
+            "0",
+            "0",
+            "1.30",
+            "5.50",
+            "12.0",  # B365
+            "1.32",
+            "5.60",
+            "12.5",  # PS
+            "1.35",
+            "1.31",
+            "5.80",
+            "5.55",
+            "13.0",
+            "12.2",  # BbMx/BbAv interleaved H,D,A
+        ]
+    )
+
+
+@pytest.fixture
+def uk_csv(tmp_path):
+    def write(rows: list[str], header: str = UK_HEADER) -> str:
+        path = tmp_path / "E0.csv"
+        path.write_text("\n".join([header, *rows]) + "\n", encoding="utf-8")
+        return str(path)
+
+    return write
+
+
+class TestSchemaDetection:
+    def test_original_layout_is_recognised(self):
+        schema = detect_schema(UK_HEADER.split(","))
+
+        assert schema.name == "football-data.co.uk"
+        assert schema.has_closing_prices
+
+    def test_derived_layout_is_recognised(self):
+        schema = detect_schema(HEADER.split(","))
+
+        assert schema.name == "club-football-match-data"
+        assert not schema.has_closing_prices
+
+    def test_an_unknown_layout_is_refused_rather_than_half_read(self):
+        with pytest.raises(CommandError, match="Unrecognised CSV layout"):
+            detect_schema(["kickoff", "team_a", "team_b", "score"])
+
+
+@pytest.mark.django_db
+class TestOriginalFootballDataLayout:
+    def test_loads_results_from_the_original_columns(self, uk_csv):
+        load(uk_csv([uk_row()]), division="E0")
+
+        event = Event.objects.get()
+        assert event.status == Event.STATUS_FINAL
+        assert event.date.year == 2018 and event.date.hour == 20
+        home = event.competitors.get(home_away=Competitor.HOME)
+        away = event.competitors.get(home_away=Competitor.AWAY)
+        assert (home.score_int, away.score_int) == (2, 1)
+        assert home.winner is True
+
+    def test_stores_opening_and_closing_as_separate_providers(self, uk_csv):
+        """A closing price is not one anybody could have taken at forecast time.
+
+        Keeping them apart is what stops hindsight being settled as an edge.
+        """
+        load(uk_csv([uk_row()]), division="E0")
+        event = Event.objects.get()
+
+        opening = {
+            o.selection: o.decimal_odds
+            for o in event.odds.filter(provider_espn_id="fd-ps", market="1x2")
+        }
+        closing = {
+            o.selection: o.decimal_odds
+            for o in event.odds.filter(provider_espn_id="fd-psc", market="1x2")
+        }
+
+        assert opening == {"home": 1.58, "draw": 3.93, "away": 7.50}
+        assert closing == {"home": 1.55, "draw": 4.07, "away": 7.69}
+
+    def test_every_price_series_in_the_file_is_stored(self, uk_csv):
+        load(uk_csv([uk_row()]), division="E0")
+
+        stored = set(Odds.objects.values_list("provider_espn_id", flat=True))
+
+        assert stored == {
+            "fd-b365",
+            "fd-b365c",
+            "fd-ps",
+            "fd-psc",
+            "fd-max",
+            "fd-maxc",
+            "fd-avg",
+            "fd-avgc",
+        }
+
+    def test_reports_that_closing_prices_are_available(self, uk_csv):
+        output = load(uk_csv([uk_row()]), division="E0")
+
+        assert "Layout detected: football-data.co.uk" in output
+        assert "closing-line value can be measured" in output
+
+    def test_warns_when_a_file_has_no_closing_prices(self, csv_file):
+        output = load(csv_file([row()]), division="I1")
+
+        assert "not a closing-line-value calculation" in output
+
+    def test_keeps_match_statistics_and_the_referee(self, uk_csv):
+        load(uk_csv([uk_row()]), division="E0")
+
+        event = Event.objects.get()
+        stats = {s["name"]: s["value"] for s in event.competitors.get(home_away="home").statistics}
+        assert stats == {
+            "shots": 8,
+            "shotsOnTarget": 6,
+            "corners": 2,
+            "fouls": 11,
+            "yellowCards": 2,
+            "redCards": 0,
+        }
+        assert event.raw_data["referee"] == "A Marriner"
+        assert event.raw_data["layout"] == "football-data.co.uk"
+
+    def test_stores_totals_from_both_eras_of_column_naming(self, uk_csv):
+        load(uk_csv([uk_row()]), division="E0")
+
+        assert event_price("fd-b365", "totals", "over") == 1.80
+        assert event_price("fd-psc", "totals", "over") == 1.85
+
+
+@pytest.mark.django_db
+class TestLegacyColumnNames:
+    def test_betbrain_aggregates_load_under_the_same_provider(self, uk_csv):
+        """The source renamed BbMxH to MaxH in 2019 without changing its meaning.
+
+        Both eras land on fd-max so an analysis spanning the rename does not see
+        the aggregate simply vanish halfway through.
+        """
+        load(uk_csv([uk_old_row()], header=UK_HEADER_OLD), division="E0")
+
+        assert event_price("fd-max", "1x2", "home") == 1.35
+        assert event_price("fd-avg", "1x2", "home") == 1.31
+
+    def test_the_column_a_price_came_from_is_recorded(self, uk_csv):
+        load(uk_csv([uk_old_row()], header=UK_HEADER_OLD), division="E0")
+
+        odds = Odds.objects.get(provider_espn_id="fd-max", market="1x2", selection="home")
+        assert odds.raw_data["column"] == "BbMxH"
+
+    def test_two_digit_years_are_read_as_this_century(self, uk_csv):
+        load(uk_csv([uk_old_row(date="17/08/13")], header=UK_HEADER_OLD), division="E0")
+
+        assert Event.objects.get().date.year == 2013
+
+    def test_a_file_with_no_closing_columns_stores_none(self, uk_csv):
+        load(uk_csv([uk_old_row()], header=UK_HEADER_OLD), division="E0")
+
+        assert not Odds.objects.filter(provider_espn_id__endswith="c").exists()
+
+
+@pytest.mark.django_db
+class TestLeagueSlugOverride:
+    def test_a_load_can_be_directed_at_an_explicit_league(self, uk_csv):
+        load(uk_csv([uk_row()]), division="E0", league_slug="eng.1.closing")
+
+        assert League.objects.filter(slug="eng.1.closing").exists()
+        assert not League.objects.filter(slug="eng.1").exists()
+
+    def test_lower_english_divisions_have_their_own_slugs(self, uk_csv):
+        load(uk_csv([uk_row(division="E2")]), division="E2")
+
+        league = League.objects.get(slug="eng.3")
+        assert league.name == "English League One"
+
+
+def event_price(provider: str, market: str, selection: str) -> float:
+    return Odds.objects.get(
+        provider_espn_id=provider, market=market, selection=selection
+    ).decimal_odds
