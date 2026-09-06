@@ -350,6 +350,54 @@ the pool wants to sharpen the price and subtract the models, not blend them in.
 Under the promotion rule, neither model is eligible for a betting decision. That is
 the correct outcome, and the reason the rule exists.
 
+#### The gate had a hole, and a coin-flip walked through it
+
+The promotion test above compares the market alone against the market pooled with
+a candidate. It had no null control, and that turns out to matter more than the
+threshold it did have.
+
+Fed a candidate built from **pure noise**, the pool improved the holdout by
++0.0001 with `t = +3.14`. A source that knows nothing cannot add information, so
+the verdict was the machinery's, not the data's.
+
+The mechanism is visible in the weights. Fitting the market *alone* gives it a
+weight of **1.0863**, not 1.0 — the pool sharpens the price. Add any second
+source and it becomes a second knob on that same temperature adjustment, worth a
+little log loss whatever the source contains. Elo's fitted weight of −0.063 is
+not Elo contributing; it is the pool asking for slightly different sharpening.
+
+Three checks now stand between a candidate and a verdict:
+
+1. **A permutation null.** The same candidate's forecasts, reattached to the wrong
+   matches. Same distribution, same confidence, no link to any outcome — so
+   whatever it still gains is the floor a real candidate has to clear.
+2. **A paired standard error.** `assess` reported a point estimate and nothing
+   else; it now carries a per-match standard error and a 95% interval.
+3. **Split stability**, checked by hand and reported below, because a single
+   train/test boundary can be lucky.
+
+On real Serie A this changes a verdict:
+
+| candidate | improvement | t | 95% interval | shuffled null |
+|---|---|---|---|---|
+| market + Dixon-Coles | +0.0000 | +1.40 | [−0.0000, +0.0000] | +0.0004 |
+| market + Elo | +0.0003 | **+2.03** | [+0.0000, +0.0005] | **+0.0004** |
+| market + both | +0.0002 | +1.51 | [−0.0001, +0.0005] | +0.0003 |
+
+Elo clears two standard errors. It is still refused, because **its own shuffled
+forecasts do better**. Significance alone would have promoted it.
+
+The split-stability check is worth recording too. Pooling all three candidates,
+the improvement runs −0.0003 → +0.0010 → +0.0033 as the training share goes from
+40% to 50% to 70%, flipping sign and reaching `t = +3.96` at the far end. An
+effect that grows monotonically with how much data the weights are fitted on is a
+description of the fitting, not of the football.
+
+**None of this changes the project's conclusions** — every candidate was refused
+before and is refused now, and the negative results are better supported than
+they were. What changed is that the gate can no longer be walked through by
+something that knows nothing.
+
 ### Removing the bookmaker's margin
 
 A quoted book always implies more than 100%. Recovering what it actually believes

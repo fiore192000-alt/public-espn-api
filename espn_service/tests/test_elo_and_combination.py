@@ -2,6 +2,7 @@
 
 import json
 import math
+import random
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 
@@ -344,3 +345,120 @@ class TestCompareModelsCommand:
         call_command("seed_demo_data", rounds=20, upcoming=0, stdout=StringIO())
         with pytest.raises(CommandError):
             call_command("compare_models", "demo.1", stdout=StringIO())
+
+
+class TestNullControl:
+    """The gate is only worth having if a source that knows nothing fails it.
+
+    A pure-noise candidate was observed improving the holdout by +0.0001 with
+    t = +3.14 under the old rule, because the pool uses any extra source as a
+    temperature knob on the market's probabilities. These tests pin that shut.
+    """
+
+    def market(self, index: int) -> dict[str, float]:
+        # A market that is right on average but varies match to match.
+        tilt = 0.10 * math.sin(index)
+        return {"home": 0.45 + tilt, "draw": 0.28, "away": 0.27 - tilt}
+
+    def samples(self, count: int = 600, *, informed: bool) -> list[combination.Sample]:
+        """A candidate that leans towards a signal, which may or may not be real.
+
+        The signal agrees with the outcome more often than chance when
+        ``informed``, and is drawn independently when not. Both candidates look
+        identical in shape and confidence; only one correlates with what
+        happened, which is exactly the distinction the gate has to make.
+        """
+        rng = random.Random(4242)
+        built = []
+        for index in range(count):
+            market = self.market(index)
+            outcomes = list(market)
+            actual = rng.choices(outcomes, weights=list(market.values()))[0]
+            drawn = rng.choices(outcomes, weights=list(market.values()))[0]
+            signal = actual if (informed and rng.random() < 0.55) else drawn
+            candidate = {k: v * (1.8 if k == signal else 1.0) for k, v in market.items()}
+            total = sum(candidate.values())
+            built.append(
+                combination.Sample(
+                    probabilities={
+                        "market": market,
+                        "candidate": {k: v / total for k, v in candidate.items()},
+                    },
+                    actual=actual,
+                )
+            )
+        return built
+
+    def verdict(self, samples: list[combination.Sample]) -> dict:
+        return combination.assess(samples, market="market", candidates=["candidate"]).verdicts[0]
+
+    def test_a_candidate_that_knows_something_still_passes(self):
+        verdict = self.verdict(self.samples(informed=True))
+
+        assert verdict["adds_information"]
+        assert verdict["improvement_over_market"] > verdict["null_improvement"]
+        assert verdict["interval"][0] > 0
+
+    def test_a_candidate_that_knows_nothing_is_refused(self):
+        verdict = self.verdict(self.samples(informed=False))
+
+        assert not verdict["adds_information"]
+
+    def test_the_verdict_carries_an_error_and_an_interval(self):
+        verdict = self.verdict(self.samples(informed=True))
+
+        assert verdict["stderr"] > 0
+        assert verdict["interval"][0] < verdict["improvement_over_market"] < verdict["interval"][1]
+        assert abs(verdict["t"]) > 0
+
+    def test_the_null_is_the_same_forecasts_on_the_wrong_matches(self):
+        samples = self.samples(60, informed=True)
+
+        permuted = combination.permute(samples, ["candidate"])
+
+        assert len(permuted) == len(samples)
+        assert [s.actual for s in permuted] == [s.actual for s in samples]
+        # The market is untouched; only the candidate is scrambled.
+        assert [s.probabilities["market"] for s in permuted] == [
+            s.probabilities["market"] for s in samples
+        ]
+        donors = sorted(tuple(sorted(s.probabilities["candidate"].items())) for s in permuted)
+        originals = sorted(tuple(sorted(s.probabilities["candidate"].items())) for s in samples)
+        assert donors == originals
+
+    def test_an_improvement_indistinguishable_from_zero_is_refused(self):
+        """Significance is required on top of size, not instead of it.
+
+        Thirty matches of a real signal give a large point estimate the sample
+        cannot stand behind. Under the old rule its size alone would have passed.
+        """
+        verdict = self.verdict(self.samples(30, informed=True))
+
+        assert verdict["improvement_over_market"] > combination.MEANINGFUL_IMPROVEMENT
+        assert verdict["interval"][0] <= 0
+        assert not verdict["adds_information"]
+
+    def test_the_noise_candidate_clears_the_old_size_threshold(self):
+        """The exact failure this gate was added for.
+
+        A candidate that knows nothing still improves the holdout by more than
+        MEANINGFUL_IMPROVEMENT, because the pool uses any extra source as a
+        temperature knob. Only the interval catches it.
+        """
+        verdict = self.verdict(self.samples(informed=False))
+
+        assert verdict["improvement_over_market"] > combination.MEANINGFUL_IMPROVEMENT
+        assert verdict["interval"][0] <= 0
+        assert not verdict["adds_information"]
+
+
+class TestPairedImprovement:
+    def test_measures_the_reduction_per_match(self):
+        # Differences 0.1, 0.2, 0.1 — the mean is a third of 0.4, not 0.2.
+        mean, stderr = combination.paired_improvement([1.0, 1.2, 0.8], [0.9, 1.0, 0.7])
+
+        assert mean == pytest.approx(0.4 / 3, abs=1e-9)
+        assert stderr > 0
+
+    def test_a_single_match_has_no_spread(self):
+        assert combination.paired_improvement([1.0], [0.5]) == (0.5, 0.0)

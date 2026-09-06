@@ -23,6 +23,7 @@ avoid.
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass, field
 
 OUTCOMES = ("home", "draw", "away")
@@ -34,6 +35,11 @@ _TOLERANCE = 1e-9
 # Below this improvement in held-out log-loss, a combination is not meaningfully
 # better than the market on its own.
 MEANINGFUL_IMPROVEMENT = 0.001
+# Two standard errors on the holdout, so an improvement that merely looks positive
+# does not count as one.
+CONFIDENCE_Z = 1.96
+# Seed for the permutation null. Fixed so a verdict is reproducible.
+NULL_SEED = 20260906
 
 
 @dataclass
@@ -113,6 +119,49 @@ def pooled_probabilities(
     exponentials = {outcome: math.exp(score - largest) for outcome, score in scores.items()}
     normaliser = sum(exponentials.values())
     return {outcome: value / normaliser for outcome, value in exponentials.items()}
+
+
+def holdout_losses(samples: list[Sample], weights: dict[str, float]) -> list[float]:
+    """Per-match log loss, which a mean cannot give a standard error to."""
+    return [
+        -math.log(max(pooled_probabilities(sample, weights)[sample.actual], _PROBABILITY_FLOOR))
+        for sample in samples
+    ]
+
+
+def paired_improvement(baseline: list[float], candidate: list[float]) -> tuple[float, float]:
+    """Mean and standard error of the per-match reduction in log loss.
+
+    Paired on the match, because the two pools are scored on identical fixtures
+    and the shared difficulty of those fixtures is not what is being measured.
+    """
+    differences = [b - c for b, c in zip(baseline, candidate, strict=True)]
+    count = len(differences)
+    if count < 2:
+        return (differences[0] if differences else 0.0), 0.0
+    mean = sum(differences) / count
+    variance = sum((value - mean) ** 2 for value in differences) / (count - 1)
+    return mean, math.sqrt(variance / count)
+
+
+def permute(samples: list[Sample], sources: list[str], seed: int = NULL_SEED) -> list[Sample]:
+    """Reattach these sources' forecasts to the wrong matches.
+
+    The permutation null. A candidate's numbers keep their distribution but lose
+    every link to what happened, so whatever improvement survives is what the
+    pool can manufacture out of a source that knows nothing. Gaussian noise would
+    also work but would not look like a real forecast; this does.
+    """
+    order = list(range(len(samples)))
+    random.Random(seed).shuffle(order)
+    permuted = []
+    for position, sample in enumerate(samples):
+        donor = samples[order[position]]
+        probabilities = dict(sample.probabilities)
+        for source in sources:
+            probabilities[source] = donor.probabilities[source]
+        permuted.append(Sample(probabilities=probabilities, actual=sample.actual))
+    return permuted
 
 
 def log_loss(samples: list[Sample], weights: dict[str, float]) -> float:
@@ -215,18 +264,51 @@ def assess(
     if len(candidates) > 1:
         groups.append(list(candidates))
 
+    baseline_losses = holdout_losses(holdout, market_alone.weights)
+
     for group in groups:
         combination = fit_pool(train, holdout, [market, *group])
         report.combinations.append(combination)
 
-        improvement = report.market_log_loss - combination.holdout_log_loss
+        improvement, stderr = paired_improvement(
+            baseline_losses, holdout_losses(holdout, combination.weights)
+        )
+        low = improvement - CONFIDENCE_Z * stderr
+
+        # The same pool, on the same matches, fed this candidate's forecasts
+        # reattached to the wrong fixtures. Whatever it still gains is what the
+        # weights can manufacture without any information at all.
+        null_train = permute(train, group)
+        null_holdout = permute(holdout, group)
+        null_fit = fit_pool(null_train, null_holdout, [market, *group])
+        null_improvement, _ = paired_improvement(
+            holdout_losses(null_holdout, market_alone.weights),
+            holdout_losses(null_holdout, null_fit.weights),
+        )
+
         report.verdicts.append(
             {
                 "candidates": group,
                 "holdout_log_loss": round(combination.holdout_log_loss, 4),
                 "improvement_over_market": round(improvement, 4),
+                "stderr": round(stderr, 4),
+                "t": round(improvement / stderr, 2) if stderr > 0 else 0.0,
+                "interval": [
+                    round(low, 4),
+                    round(improvement + CONFIDENCE_Z * stderr, 4),
+                ],
+                "null_improvement": round(null_improvement, 4),
                 "weights": {name: round(weight, 4) for name, weight in combination.weights.items()},
-                "adds_information": improvement > MEANINGFUL_IMPROVEMENT,
+                # Three things at once, because any one of them alone has been
+                # observed to pass on a source that knows nothing: the gain must
+                # be big enough to matter, distinguishable from zero, and larger
+                # than the same pool gets from this candidate's own scrambled
+                # forecasts.
+                "adds_information": (
+                    improvement > MEANINGFUL_IMPROVEMENT
+                    and low > 0
+                    and improvement > null_improvement
+                ),
             }
         )
 

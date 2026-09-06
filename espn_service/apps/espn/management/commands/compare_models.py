@@ -127,11 +127,23 @@ class Command(BaseCommand):
         for verdict in incremental["verdicts"]:
             label = " + ".join(verdict["candidates"])
             weights = " ".join(f"{name}={weight}" for name, weight in verdict["weights"].items())
+            low, high = verdict["interval"]
             self.stdout.write(
                 f"  {'market + ' + label:38}{verdict['holdout_log_loss']:>12}"
                 f"   improvement {verdict['improvement_over_market']:+.4f}"
+                f"  t {verdict['t']:+.2f}  95% [{low:+.4f}, {high:+.4f}]"
+            )
+            self.stdout.write(
+                f"  {'':38}   same candidate, forecasts shuffled onto the wrong "
+                f"matches: {verdict['null_improvement']:+.4f}"
             )
             self.stdout.write(f"  {'':38}   weights: {weights}")
+
+        self.stdout.write(
+            "  The shuffled figure is the floor. A pool given any extra source uses it as a\n"
+            "  temperature knob on the price, so a candidate that knows nothing still shows a\n"
+            "  small gain — an improvement has to clear that, and its own standard error."
+        )
 
         useful = [v for v in incremental["verdicts"] if v["adds_information"]]
         self.stdout.write("")
