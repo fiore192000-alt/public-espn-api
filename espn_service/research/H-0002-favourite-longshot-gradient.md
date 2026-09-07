@@ -76,14 +76,51 @@ built on it are short-lived. Split by era:
 
 | era | matches | Spearman |
 |---|---|---|
-| 2005–2011 | 11,421 | **−0.750** |
-| 2012–2017 | 11,014 | **−0.429** |
+| 2005–2011 | 11,421 | −0.750 |
+| 2012–2017 | 11,014 | −0.429 |
 | 2018–2026 | 13,848 | **+0.000** |
 
-**The gradient decays monotonically to exactly zero.**
+*(These three cuts were chosen by me. See the rolling window below, which was
+not, and which corrects the reading of this table.)*
+
+**The gradient is gone from the modern era.**
+
+### The era boundaries were mine, so they were checked
+
+Three cuts I chose myself could manufacture a tidy decay out of noise — the same
+charge this note levels at the pooled number. A rolling window of 9,000 matches
+stepping 2,000 chooses no boundary:
+
+| window | Spearman | 10.00+ yield |
+|---|---|---|
+| 2005-07 → 2010-09 | −0.821 | −35.01% |
+| 2006-09 → 2011-10 | −0.750 | −21.94% |
+| 2007-12 → 2012-11 | −0.393 | −10.02% |
+| 2009-01 → 2013-12 | −0.857 | −10.65% |
+| 2010-02 → 2015-01 | −0.321 | −3.70% |
+| 2011-02 → 2016-02 | −0.429 | −8.59% |
+| 2012-03 → 2017-03 | −0.464 | −19.75% |
+| 2013-04 → 2018-04 | −0.429 | −27.59% |
+| 2014-05 → 2019-04 | −0.786 | −15.03% |
+| 2015-08 → 2020-09 | −0.929 | −4.86% |
+| 2016-10 → 2021-09 | **−0.036** | **+12.15%** |
+| 2017-10 → 2022-10 | **+0.000** | **+34.36%** |
+| 2018-12 → 2023-11 | **−0.071** | **+29.20%** |
+| 2019-12 → 2025-01 | **−0.071** | **+12.70%** |
+
+**The collapse is robust: the last four overlapping windows, covering 2016–2025,
+all sit within 0.07 of zero.** It is not an artefact of where the cuts were put.
+
+**But this table also corrects the three-era one above, and the correction is
+against me.** Those three numbers — −0.750, −0.429, +0.000 — read as a gradual,
+orderly decline. The rolling window shows nothing of the kind: before 2016 the
+gradient swings between −0.32 and −0.93 with no trend at all, and then drops to
+zero and stays. The effect did not fade; it was unstable throughout and then
+stopped. A three-row table that implies a smooth decay is a story the data does
+not tell, and it is the sort of tidiness that should be distrusted on sight.
 
 The pooled −0.964 was carried by the extreme longshots, and that is where the
-decay is starkest — the `10.00+` band returned **−25.08%** in 2005–2011 and
+change is starkest — the `10.00+` band returned **−25.08%** in 2005–2011 and
 **−20.82%** in 2012–2017, then **+18.85%** in 2018–2026. The mispricing that
 made the ladder monotone has not merely shrunk; it has reversed sign.
 
