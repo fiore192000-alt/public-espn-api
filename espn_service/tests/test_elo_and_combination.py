@@ -355,6 +355,40 @@ class TestCompareModelsCommand:
         tested = {tuple(v["candidates"]) for v in payload["incremental"]["verdicts"]}
         assert ("expected_goals",) in tested
 
+    def test_a_partial_xg_history_narrows_the_comparison_to_a_common_set(self, loaded):
+        """Five sources cannot be scored on five different sets of fixtures."""
+        from apps.espn.models import ExpectedGoals
+
+        events = list(Event.objects.filter(league__slug="ita.1").order_by("date"))
+        for index, event in enumerate(events[len(events) // 2 :]):
+            ExpectedGoals.objects.create(
+                event=event,
+                home=1.0 + (index % 5) * 0.25,
+                away=0.8 + (index % 4) * 0.25,
+                source="test",
+            )
+
+        out = StringIO()
+        call_command("compare_models", "ita.1", refit_every=5, json=True, stdout=out)
+        payload = json.loads(out.getvalue())
+
+        assert payload["narrowed_from"] > payload["matches"]
+        assert "expected_goals" in payload["sources"]
+
+    def test_no_xg_keeps_the_whole_history(self, loaded):
+        from apps.espn.models import ExpectedGoals
+
+        events = list(Event.objects.filter(league__slug="ita.1").order_by("date"))
+        for event in events[len(events) // 2 :]:
+            ExpectedGoals.objects.create(event=event, home=1.2, away=1.0, source="test")
+
+        out = StringIO()
+        call_command("compare_models", "ita.1", refit_every=5, no_xg=True, json=True, stdout=out)
+        payload = json.loads(out.getvalue())
+
+        assert payload["narrowed_from"] == 0
+        assert "expected_goals" not in payload["sources"]
+
     def test_club_elo_is_dropped_when_the_data_carries_no_ratings(self, loaded):
         """A league loaded from a source without ClubElo still compares the rest."""
         Event.objects.filter(league__slug="ita.1").update(raw_data={})

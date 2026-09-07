@@ -32,6 +32,14 @@ class Command(BaseCommand):
             default=0.5,
             help="Share of matches used to fit the pooling weights (default: 0.5).",
         )
+        parser.add_argument(
+            "--no-xg",
+            action="store_true",
+            help=(
+                "Skip expected goals and compare the other models over the whole "
+                "history instead of the seasons xG covers."
+            ),
+        )
         parser.add_argument("--json", action="store_true", help="Emit the raw report as JSON.")
 
     def handle(self, *args, **options) -> None:
@@ -54,6 +62,18 @@ class Command(BaseCommand):
         rated = [record for record in records if record.club_elo_probabilities]
         if rated:
             records = rated
+
+        # xG exists only from 2014/15 onward, so `records[0]` is the wrong probe:
+        # it is the oldest match in the league and never carries it. Comparing
+        # five sources also needs one common set of fixtures -- a log loss over
+        # 2,829 matches cannot be set beside one over 7,888 -- and the pool
+        # raises on a missing source, so when xG covers part of the history the
+        # whole comparison narrows to that part.
+        with_xg = [record for record in records if record.expected_goals_probabilities]
+        narrowed_from = 0
+        if with_xg and not options["no_xg"]:
+            narrowed_from = len(records)
+            records = with_xg
         if not records:
             with_odds = sum(1 for r in report.forecasts if r.market_probabilities)
             with_elo = sum(1 for r in report.forecasts if r.elo_probabilities)
@@ -68,20 +88,25 @@ class Command(BaseCommand):
                 )
             )
 
+        # A source joins only where every remaining record carries it: the pool
+        # raises on a missing one, and a log loss over a subset cannot be set
+        # beside a log loss over the whole.
+        candidates = [DIXON_COLES, ELO]
+        if all(record.club_elo_probabilities for record in records):
+            candidates.append(CLUB_ELO)
+        if all(record.expected_goals_probabilities for record in records):
+            candidates.append(EXPECTED_GOALS)
+
         samples = [
             Sample(
                 probabilities={
                     MARKET: record.market_probabilities,
                     DIXON_COLES: record.probabilities,
                     ELO: record.elo_probabilities,
-                    **(
-                        {CLUB_ELO: record.club_elo_probabilities}
-                        if record.club_elo_probabilities
-                        else {}
-                    ),
+                    **({CLUB_ELO: record.club_elo_probabilities} if CLUB_ELO in candidates else {}),
                     **(
                         {EXPECTED_GOALS: record.expected_goals_probabilities}
-                        if record.expected_goals_probabilities
+                        if EXPECTED_GOALS in candidates
                         else {}
                     ),
                 },
@@ -89,12 +114,6 @@ class Command(BaseCommand):
             )
             for record in records
         ]
-
-        candidates = [DIXON_COLES, ELO]
-        if records[0].club_elo_probabilities:
-            candidates.append(CLUB_ELO)
-        if records[0].expected_goals_probabilities:
-            candidates.append(EXPECTED_GOALS)
 
         incremental = assess(
             samples,
@@ -108,14 +127,10 @@ class Command(BaseCommand):
                 (MARKET, "market_probabilities"),
                 (DIXON_COLES, "probabilities"),
                 (ELO, "elo_probabilities"),
-                *(
-                    [(CLUB_ELO, "club_elo_probabilities")]
-                    if records[0].club_elo_probabilities
-                    else []
-                ),
+                *([(CLUB_ELO, "club_elo_probabilities")] if CLUB_ELO in candidates else []),
                 *(
                     [(EXPECTED_GOALS, "expected_goals_probabilities")]
-                    if records[0].expected_goals_probabilities
+                    if EXPECTED_GOALS in candidates
                     else []
                 ),
             )
@@ -124,6 +139,8 @@ class Command(BaseCommand):
         payload = {
             "league": league.slug,
             "matches": len(records),
+            "narrowed_from": narrowed_from,
+            "sources": [MARKET, *candidates],
             "standalone": standalone,
             "incremental": incremental.to_dict(),
         }
@@ -138,6 +155,12 @@ class Command(BaseCommand):
         self.stdout.write("")
         self.stdout.write(self.style.MIGRATE_HEADING(f"Model comparison — {payload['league']}"))
         self.stdout.write(f"  {payload['matches']} matches with both odds and an Elo forecast.")
+        if payload["narrowed_from"]:
+            self.stdout.write(
+                f"  Narrowed from {payload['narrowed_from']} to the seasons expected goals "
+                "covers, so\n  all five sources are scored on the same fixtures. "
+                "Pass --no-xg for the full history."
+            )
 
         self.stdout.write("")
         self.stdout.write("  Standalone forecast quality (lower is better)")
