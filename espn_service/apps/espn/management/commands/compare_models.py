@@ -12,10 +12,11 @@ MARKET = "market"
 DIXON_COLES = "dixon_coles"
 ELO = "elo"
 CLUB_ELO = "club_elo"
+EXPECTED_GOALS = "expected_goals"
 
 
 class Command(BaseCommand):
-    help = "Score Dixon-Coles, Elo and the market, then test each for information the price lacks."
+    help = "Score every model against the market, then test each for information the price lacks."
 
     def add_arguments(self, parser) -> None:
         parser.add_argument("league", help="League slug (e.g. 'ita.1').")
@@ -78,20 +79,27 @@ class Command(BaseCommand):
                         if record.club_elo_probabilities
                         else {}
                     ),
+                    **(
+                        {EXPECTED_GOALS: record.expected_goals_probabilities}
+                        if record.expected_goals_probabilities
+                        else {}
+                    ),
                 },
                 actual=record.actual,
             )
             for record in records
         ]
 
+        candidates = [DIXON_COLES, ELO]
+        if records[0].club_elo_probabilities:
+            candidates.append(CLUB_ELO)
+        if records[0].expected_goals_probabilities:
+            candidates.append(EXPECTED_GOALS)
+
         incremental = assess(
             samples,
             market=MARKET,
-            candidates=(
-                [DIXON_COLES, ELO, CLUB_ELO]
-                if records[0].club_elo_probabilities
-                else [DIXON_COLES, ELO]
-            ),
+            candidates=candidates,
             train_fraction=options["train_fraction"],
         )
         standalone = {
@@ -103,6 +111,11 @@ class Command(BaseCommand):
                 *(
                     [(CLUB_ELO, "club_elo_probabilities")]
                     if records[0].club_elo_probabilities
+                    else []
+                ),
+                *(
+                    [(EXPECTED_GOALS, "expected_goals_probabilities")]
+                    if records[0].expected_goals_probabilities
                     else []
                 ),
             )

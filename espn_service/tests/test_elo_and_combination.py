@@ -335,6 +335,26 @@ class TestCompareModelsCommand:
         assert payload["incremental"]["market_only_log_loss"] is not None
         assert payload["matches"] > 0
 
+    def test_expected_goals_joins_the_comparison_when_the_league_carries_xg(self, loaded, tmp_path):
+        """The fourth model was silently absent from this command until now."""
+        from apps.espn.models import ExpectedGoals
+
+        for index, event in enumerate(Event.objects.filter(league__slug="ita.1")):
+            ExpectedGoals.objects.create(
+                event=event,
+                home=1.0 + (index % 5) * 0.25,
+                away=0.8 + (index % 4) * 0.25,
+                source="test",
+            )
+
+        out = StringIO()
+        call_command("compare_models", "ita.1", refit_every=5, json=True, stdout=out)
+        payload = json.loads(out.getvalue())
+
+        assert "expected_goals" in payload["standalone"]
+        tested = {tuple(v["candidates"]) for v in payload["incremental"]["verdicts"]}
+        assert ("expected_goals",) in tested
+
     def test_club_elo_is_dropped_when_the_data_carries_no_ratings(self, loaded):
         """A league loaded from a source without ClubElo still compares the rest."""
         Event.objects.filter(league__slug="ita.1").update(raw_data={})
