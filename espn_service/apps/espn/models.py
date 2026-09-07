@@ -142,7 +142,9 @@ class Event(TimestampMixin):
 
     # Season information
     season_year = models.PositiveIntegerField()
-    season_type = models.PositiveSmallIntegerField(default=2)  # 1=preseason, 2=regular, 3=postseason
+    season_type = models.PositiveSmallIntegerField(
+        default=2
+    )  # 1=preseason, 2=regular, 3=postseason
     season_slug = models.CharField(max_length=50, blank=True)
     week = models.PositiveSmallIntegerField(null=True, blank=True)
 
@@ -455,6 +457,48 @@ class Odds(TimestampMixin):
     def implied_probability(self) -> float:
         """Raw implied probability, still including the bookmaker's margin."""
         return 1.0 / self.decimal_odds if self.decimal_odds > 0 else 0.0
+
+
+class ExpectedGoals(TimestampMixin):
+    """Match-level expected goals, from shot-by-shot data.
+
+    Kept in its own table rather than on the event's ``raw_data`` or a
+    competitor's ``statistics``, both of which the Football-Data loader rewrites
+    wholesale every time a league is reloaded. xG comes from a different source
+    on a different cadence and should not be collateral damage of a results
+    refresh.
+
+    A result says who won. xG says who was likely to, which is a different and
+    usually less noisy statement about the same ninety minutes — whether it is
+    also a statement the *market* has not already made is what the models here
+    exist to find out.
+    """
+
+    event = models.OneToOneField(Event, on_delete=models.CASCADE, related_name="expected_goals")
+
+    home = models.FloatField(help_text="Expected goals for the home side.")
+    away = models.FloatField(help_text="Expected goals for the away side.")
+    home_shots = models.PositiveIntegerField(default=0)
+    away_shots = models.PositiveIntegerField(default=0)
+
+    source = models.CharField(max_length=40, default="understat", db_index=True)
+    raw_data = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = "Expected goals"
+        verbose_name_plural = "Expected goals"
+
+    def __str__(self) -> str:
+        return f"{self.event.short_name} xG {self.home:.2f}-{self.away:.2f}"
+
+    @property
+    def total(self) -> float:
+        return self.home + self.away
+
+    @property
+    def difference(self) -> float:
+        """Positive when the home side created the better chances."""
+        return self.home - self.away
 
 
 class AthleteSeasonStats(TimestampMixin):

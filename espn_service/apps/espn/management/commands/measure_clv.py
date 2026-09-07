@@ -17,6 +17,7 @@ CANDIDATES = (
     ("dixon_coles", "probabilities"),
     ("elo", "elo_probabilities"),
     ("club_elo", "club_elo_probabilities"),
+    ("expected_goals", "expected_goals_probabilities"),
 )
 
 

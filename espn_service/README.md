@@ -350,6 +350,93 @@ the pool wants to sharpen the price and subtract the models, not blend them in.
 Under the promotion rule, neither model is eligible for a betting decision. That is
 the correct outcome, and the reason the rule exists.
 
+### Expected goals — the layer everyone says is the edge
+
+A scoreline is a very small sample of a football match: two or three Bernoulli
+draws from a process that produced twenty-odd chances. Expected goals sums the
+chances instead. Every model above learns from the scoreline; this one does not.
+
+This is the layer most often named as where an amateur's advantage lives, and it
+was the last one here to be measured.
+
+```bash
+# Shot-by-shot xG, aggregated onto matches already loaded
+python manage.py ingest_understat_xg shots_epl_18-19.csv --league eng.1
+```
+
+**Identity is the hard part, not the arithmetic.** Understat says "Manchester
+United" and "Parma Calcio 1913"; Football-Data says "Man United" and "Parma". A
+naive join loses a third of the fixtures *silently*, and the survivors are not a
+random sample — a club whose name never resolves loses **every** one of its
+matches. So the loader matches on normalised names plus date (±1 day) and
+**prints every unmatched fixture** rather than counting them. Two aliases were
+added because the report named the clubs: QPR and Parma.
+
+`expected_goals.py` keeps the ratings deliberately plain — an exponentially
+time-weighted mean of the xG each side creates and concedes, relative to the
+league — and feeds them to the same Poisson grid with the same Dixon-Coles
+low-score correction as everything else, so the comparison measures the **input**
+rather than two different estimators. Ratings are **shrunk toward the league mean**
+in proportion to how little history a side has, which is the fix for the failure
+on record: two fixtures crowning a promoted club at 89.8%.
+
+xG is stored in its own table rather than on the event, because the Football-Data
+loader rewrites `raw_data` and competitor statistics wholesale on every reload.
+
+#### On 3,930 Premier League matches with a market price
+
+| source | log loss |
+|---|---|
+| market | **0.9536** |
+| Elo | 0.9709 |
+| ClubElo | 0.9714 |
+| Dixon-Coles | 0.9922 |
+| **expected goals** | **1.0049** |
+
+**It is the worst forecaster in the repository.** Paired on the same fixtures it
+loses to Elo by 0.0340 (`t = −6.42`) and to ClubElo by 0.0335 (`t = −6.89`), and
+is indistinguishable from Dixon-Coles (`t = −1.45`).
+
+That result deserves a caveat rather than a verdict on xG itself. This is *one*
+implementation — time-weighted means with shrinkage — against two ordered logits
+fitted by maximum likelihood, and it has 2,817 matches of xG history against the
+7,600 of goals the others learn from. **"xG as built here is the weakest input" is
+supported; "xG is worthless" is not.**
+
+#### And it fails both gates, like everything else
+
+| candidate | improvement over market | t | null |
+|---|---|---|---|
+| expected goals | +0.0001 | +0.33 | +0.0000 |
+| ClubElo | +0.0003 | +0.92 | +0.0001 |
+| Elo | +0.0000 | +0.67 | +0.0001 |
+| Dixon-Coles | +0.0000 | +0.17 | +0.0002 |
+
+Nothing adds information the price lacks.
+
+#### One row worth keeping
+
+Anticipation of the closing line on 2,062 Premier League matches, net of the
+anchor null:
+
+| model | slope | t | anchor | **net** |
+|---|---|---|---|---|
+| **expected goals** | **+0.0058** | +1.16 | −0.0030 | **+0.0088** |
+| Dixon-Coles | −0.0104 | −1.69 | −0.0039 | −0.0065 |
+| Elo | −0.0194 | −2.47 | −0.0041 | −0.0153 |
+| ClubElo | −0.0234 | −2.93 | −0.0040 | −0.0194 |
+
+`t = +1.16` establishes nothing, and it is not claimed to. But it is the **only
+model of the four whose disagreement with the opening price points the right
+way** in the Premier League, where all three goal-based models point the wrong
+way and two of them significantly so. The worst forecaster is the only one not
+actively misleading about where the line goes.
+
+That is a hypothesis, not a finding: it needs registering and testing on data
+that did not produce it. It is also exactly the shape of thing this project has
+learned to distrust — a single positive cell among many, noticed after the fact.
+Recorded here so it can be tested rather than remembered.
+
 ### A third model, and the clearest statement of the whole problem
 
 Dixon-Coles and Elo both learn a club's strength from matches **inside** the

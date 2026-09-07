@@ -21,7 +21,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from apps.espn import club_elo, elo, markets
+from apps.espn import club_elo, elo, expected_goals, markets
 from apps.espn.analysis import _completed_events, _sided_competitors
 from apps.espn.dixon_coles import (
     DEFAULT_HALF_LIFE_DAYS,
@@ -111,6 +111,8 @@ class ForecastRecord:
     # A third, rated over every competition its clubs play rather than only this
     # league — the only one that knows anything about a promoted side.
     club_elo_probabilities: dict[str, float] | None = None
+    # A fourth, learning from chances created rather than from goals scored.
+    expected_goals_probabilities: dict[str, float] | None = None
     # What the market settled on. Not a price anybody could have taken when this
     # forecast was made — it exists only to score the forecast against, never to
     # bet into.
@@ -414,6 +416,20 @@ def _devigged(book: dict[str, float] | None) -> dict[str, float] | None:
     return {outcome: fair[outcome] for outcome in OUTCOMES}
 
 
+def _xg_probabilities(
+    model: expected_goals.XgModel | None,
+    home_id: int,
+    away_id: int,
+) -> dict[str, float] | None:
+    """None when the fixture has a side the xG ratings have never seen."""
+    if model is None:
+        return None
+    try:
+        return model.probabilities(home_id, away_id)
+    except NotEnoughData:
+        return None
+
+
 def _market_probabilities(prices: list[PricedSelection]) -> dict[str, float] | None:
     """Devig one provider's 1X2 prices into a probability the model can be scored against."""
     by_provider: dict[str, dict[str, float]] = {}
@@ -506,6 +522,12 @@ def run(
     club_elo_samples: list[tuple[float, str]] = []
     club_elo_model: club_elo.ClubEloModel | None = None
 
+    # Expected goals arrive per match like the ratings do, and are sliced in
+    # memory the same way the goal history is, so a fit never sees the future.
+    xg_history = expected_goals.collect_observations(league)
+    xg_consumed = 0
+    xg_model: expected_goals.XgModel | None = None
+
     for event in events:
         sides = _sided_competitors(event)
         if sides is None:
@@ -520,6 +542,8 @@ def run(
         while elo_consumed < consumed:
             elo_ratings.update(history[elo_consumed])
             elo_consumed += 1
+        while xg_consumed < len(xg_history) and xg_history[xg_consumed].date < event.date:
+            xg_consumed += 1
 
         if model is None or since_refit >= refit_every:
             if consumed < MINIMUM_MATCHES:
@@ -536,6 +560,15 @@ def run(
                 club_elo_model = club_elo.fit(club_elo_samples, initial=club_elo_model)
             except elo.NotEnoughData:
                 club_elo_model = None
+            try:
+                xg_model = expected_goals.fit(
+                    xg_history[:xg_consumed],
+                    reference_date=event.date,
+                    half_life_days=half_life_days,
+                    rho=model.rho,
+                )
+            except NotEnoughData:
+                xg_model = None
             report.refits += 1
             since_refit = 0
         since_refit += 1
@@ -580,6 +613,9 @@ def run(
                     club_elo_model.probabilities(*club_elo_ratings)
                     if club_elo_model is not None and club_elo_ratings is not None
                     else None
+                ),
+                expected_goals_probabilities=_xg_probabilities(
+                    xg_model, home.team_id, away.team_id
                 ),
             )
         )
