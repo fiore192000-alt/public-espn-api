@@ -60,6 +60,39 @@ ALIASES = {
     "hellasverona": "verona",
     "spal": "spal",
     "chievo": "chievo",
+    # Spain. The database carries Football-Data's short forms, Understat the
+    # full club names; neither is wrong, so every pair is written out.
+    "athleticclub": "athbilbao",
+    "atleticomadrid": "athmadrid",
+    "celtavigo": "celta",
+    "deportivolacoruna": "lacoruna",
+    "espanyol": "espanol",
+    "rayovallecano": "vallecano",
+    "realbetis": "betis",
+    "realsociedad": "sociedad",
+    "realvalladolid": "valladolid",
+    "sdhuesca": "huesca",
+    "sportinggijon": "spgijon",
+    # Germany.
+    "arminiabielefeld": "bielefeld",
+    "bayerleverkusen": "leverkusen",
+    "borussiadortmund": "dortmund",
+    "borussiamgladbach": "mgladbach",
+    "eintrachtfrankfurt": "einfrankfurt",
+    "cologne": "koln",
+    "fortunaduesseldorf": "fortunadusseldorf",
+    "greutherfuerth": "greutherfurth",
+    "hamburgersv": "hamburg",
+    "herthaberlin": "hertha",
+    "nuernberg": "nurnberg",
+    "rasenballsportleipzig": "rbleipzig",
+    "vfbstuttgart": "stuttgart",
+    # France.
+    "clermontfoot": "clermont",
+    "gfcajaccio": "ajacciogfco",
+    "parissaintgermain": "parissg",
+    "saintetienne": "stetienne",
+    "scbastia": "bastia",
 }
 
 
