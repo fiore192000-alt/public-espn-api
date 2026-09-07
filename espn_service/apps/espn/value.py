@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
+from apps.espn import devig
 from apps.espn.markets import MARKET_TOTALS
 
 # Model probability must exceed the devigged market probability by this much.
@@ -25,6 +26,12 @@ DEFAULT_EDGE_THRESHOLD = 0.05
 DEFAULT_KELLY_FRACTION = 0.25
 # No single bet takes more than this share of the bankroll, whatever Kelly says.
 DEFAULT_MAX_STAKE_FRACTION = 0.05
+# Measured on 3,799 Serie A books: proportional devig is worse than both Shin and
+# power by a distinguishable margin (paired t = -3.6 and -3.2), while Shin and
+# power cannot be told apart (t = -1.9). Shin wins the tie on grounds the data
+# cannot settle — it models *why* the margin sits where it does, rather than
+# fitting an exponent to make the book sum to one.
+DEFAULT_DEVIG_METHOD = devig.SHIN
 
 
 @dataclass
@@ -64,13 +71,19 @@ def overround(prices: list[float]) -> float:
     return sum(1.0 / price for price in prices if price > 0)
 
 
-def remove_margin(prices: dict[str, float]) -> dict[str, float]:
-    """Devig a complete market by scaling implied probabilities to sum to one."""
-    implied = {selection: 1.0 / price for selection, price in prices.items() if price and price > 0}
-    total = sum(implied.values())
-    if total <= 0:
+def remove_margin(
+    prices: dict[str, float],
+    method: str = DEFAULT_DEVIG_METHOD,
+) -> dict[str, float]:
+    """Recover what the book believes, with the bookmaker's margin taken out.
+
+    Returns an empty mapping rather than raising when the prices cannot be
+    devigged, since callers here treat an unusable market as one to skip.
+    """
+    try:
+        return devig.remove_margin(prices, method)
+    except devig.DevigError:
         return {}
-    return {selection: value / total for selection, value in implied.items()}
 
 
 def expected_value(probability: float, decimal_odds: float) -> float:
@@ -110,6 +123,7 @@ def find_value_bets(
     edge_threshold: float = DEFAULT_EDGE_THRESHOLD,
     kelly_multiplier: float = DEFAULT_KELLY_FRACTION,
     max_stake_fraction: float = DEFAULT_MAX_STAKE_FRACTION,
+    devig_method: str = DEFAULT_DEVIG_METHOD,
 ) -> list[ValueBet]:
     """Find selections where the model's probability beats the devigged price.
 
@@ -126,7 +140,7 @@ def find_value_bets(
         if len(group) < 2:
             continue
 
-        fair = remove_margin({price.selection: price.decimal_odds for price in group})
+        fair = remove_margin({price.selection: price.decimal_odds for price in group}, devig_method)
         if not fair:
             continue
 

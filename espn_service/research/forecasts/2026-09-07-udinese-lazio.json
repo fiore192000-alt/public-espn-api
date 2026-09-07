@@ -1,0 +1,139 @@
+{
+  "assessment": {
+    "actual": "away",
+    "margin_of_the_call": "The model put home at 0.3597 and away at 0.3559 -- 0.38 percentage points apart. Pinnacle put away at 0.3452 against home 0.3428, 0.24 apart. Both were near-coin-flips; the market's lean was the right one and the model's was not.",
+    "market_favoured": "away",
+    "model_favoured": "home",
+    "the_stand_down_was_right_for_the_stated_reason": "The decision was no bet because the best selection sat below the edge threshold and was the signal H-0003 measures as pointing the wrong way. That reasoning is unchanged by the result. Backing Lazio at the 2.60 available retail would have won -- and at 7.80% below Pinnacle's near-close it sits in the CLV band measured at -16.14% over 8,035 bets. A winning bet taken at a bad price is still a bad bet.",
+    "what_this_settles": "Nothing. One match. The outcome that happened had a probability of about 0.35 under every source here, including the ones that got the lean wrong."
+  },
+  "away": "Lazio",
+  "closing_prices": null,
+  "closing_prices_note": "Not recovered. No closing line for Serie A exists in any data source reachable from this environment, which is the project's documented bottleneck. The Pinnacle observation above is the nearest available substitute and is labelled as a pre-match price rather than a close.",
+  "clv": {
+    "against": "Pinnacle at 26 minutes to kick-off, NOT the close",
+    "per_selection": {
+      "away": -0.078,
+      "draw": -0.0224,
+      "home": 0.0035
+    }
+  },
+  "decision": "no bet",
+  "edge": {
+    "away": -0.0071,
+    "draw": -0.0228,
+    "home": 0.0299
+  },
+  "expected_goals": {
+    "dixon_coles": [
+      1.083,
+      1.045
+    ],
+    "xg_model": [
+      1.557,
+      1.455
+    ]
+  },
+  "expected_value": {
+    "away": -0.0747,
+    "draw": -0.1327,
+    "home": 0.0253
+  },
+  "fingerprint": "aa65c9da37acd879",
+  "frozen_at": "2026-09-07T18:12:27+00:00",
+  "history": {
+    "latest": "2026-08-31",
+    "matches": 8000
+  },
+  "home": "Udinese",
+  "kickoff": "2026-09-07T18:45:00Z",
+  "league": "ita.1",
+  "market_fair": {
+    "away": 0.363,
+    "draw": 0.3072,
+    "home": 0.3298
+  },
+  "model_average": {
+    "away": 0.3559,
+    "draw": 0.2844,
+    "home": 0.3597
+  },
+  "models": {
+    "club_elo": {
+      "away": 0.3806,
+      "draw": 0.3121,
+      "home": 0.3074
+    },
+    "dixon_coles": {
+      "away": 0.3535,
+      "draw": 0.2733,
+      "home": 0.3732
+    },
+    "elo": {
+      "away": 0.3329,
+      "draw": 0.31,
+      "home": 0.3571
+    },
+    "expected_goals": {
+      "away": 0.3566,
+      "draw": 0.2421,
+      "home": 0.4013
+    }
+  },
+  "pinnacle_prematch": {
+    "fair": {
+      "away": 0.3452,
+      "draw": 0.312,
+      "home": 0.3428
+    },
+    "largest_move": {
+      "away_fair_from": 0.3392,
+      "away_fair_to": 0.3538,
+      "reading": "money on the away side, roughly half faded within three minutes",
+      "then_retraced_to": 0.3452,
+      "window": "20:08-20:16 local, eight minutes"
+    },
+    "last_observed": {
+      "away": 2.82,
+      "draw": 3.12,
+      "home": 2.84
+    },
+    "last_observed_at": "2026-09-07T18:19:00Z",
+    "mean_margin": 0.0264,
+    "note": "the last point is 26 minutes before kick-off, not the closing line",
+    "source": "supplied by the account holder, 18 observations 17:26-20:19 local"
+  },
+  "prices_taken": {
+    "away": 2.6,
+    "draw": 3.05,
+    "home": 2.85
+  },
+  "ratings": {
+    "club_elo_away": 1751.23,
+    "club_elo_home": 1659.4,
+    "elo_away": 1679.2,
+    "elo_home": 1614.6
+  },
+  "result": {
+    "competition_verified": "Serie A 2026/27, giornata 3",
+    "outcome": "away",
+    "score": "1-2",
+    "scorers": [
+      "Karlstr\u00f6m 49' (Udinese)",
+      "Frattesi 75' (Lazio)",
+      "Gudmundsson 88' (Lazio)"
+    ],
+    "sources": [
+      "ANSA",
+      "Adnkronos",
+      "Virgilio",
+      "RomaToday"
+    ]
+  },
+  "to_be_filled_after": [
+    "closing_prices",
+    "result",
+    "clv"
+  ],
+  "why": "Best selection is home at +2.53% EV, below the 5% edge threshold the value rule requires. More decisively, H-0003 measures the model's disagreement with the price as a measure of the model being wrong, and the 'edge >= +3% on the home side' rule returned -7.2% (t = -3.31) over 3,004 Serie A matches."
+}
