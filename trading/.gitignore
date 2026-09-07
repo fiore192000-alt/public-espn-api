@@ -1,0 +1,21 @@
+# Downloaded candles and trained artefacts: large, reproducible, machine-local.
+user_data/data/**
+!user_data/data/.gitkeep
+user_data/models/**
+!user_data/models/.gitkeep
+user_data/backtest_results/**
+!user_data/backtest_results/.gitkeep
+user_data/logs/**
+!user_data/logs/.gitkeep
+user_data/hyperopt_results/
+user_data/plot/
+
+# Never commit a live config or a trade database.
+user_data/config.json
+user_data/config.live.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+__pycache__/
+.pytest_cache/

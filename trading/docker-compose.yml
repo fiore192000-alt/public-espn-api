@@ -1,0 +1,21 @@
+services:
+  freqtrade:
+    build: .
+    image: freqtrade-ml:latest
+    container_name: freqtrade-ml
+    restart: unless-stopped
+    volumes:
+      - "./user_data:/freqtrade/user_data"
+    # Bound to localhost on purpose: the API must not be reachable from the
+    # network. Only useful once api_server.enabled is turned on in the config.
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # Training and inference share this so the strategy can import ml.*
+      - PYTHONPATH=/freqtrade/user_data
+    command: >
+      trade
+      --logfile /freqtrade/user_data/logs/freqtrade.log
+      --db-url sqlite:////freqtrade/user_data/tradesv3.dryrun.sqlite
+      --config /freqtrade/user_data/config.dryrun.json
+      --strategy MLProbStrategy
