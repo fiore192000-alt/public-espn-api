@@ -1,0 +1,55 @@
+{
+  "date": "2026-09-06",
+  "competition": "ita.1",
+  "round": "Serie A 2026/27, giornata 3",
+  "model": "club-elo",
+  "notes": [
+    "Model probabilities are the ClubElo ordered-logit forecasts produced before kick-off, as reported in the session that built apps/espn/club_elo.py.",
+    "Bologna-Sassuolo prices were supplied by the account holder from their own book.",
+    "The other three books are the pre-match 1X2 prices reported by Italian odds aggregators for the same fixtures; they are a single snapshot, not a best-price shop across books, so the margins here are the ordinary retail 4-7% rather than a Pinnacle-grade 2.9%.",
+    "Results are final scores confirmed against ANSA and match-report sources.",
+    "Only the 15:00 and 20:45 kick-offs of this round are on the card; matches for which no price snapshot could be recovered are absent rather than invented."
+  ],
+  "fixtures": [
+    {
+      "home": "Frosinone",
+      "away": "Venezia",
+      "kickoff": "2026-09-06T15:00",
+      "book": "aggregator snapshot",
+      "prices": {"home": 2.60, "draw": 3.30, "away": 2.70},
+      "model": {"home": 0.419, "draw": 0.307, "away": 0.274},
+      "result": "home",
+      "score": "3-2"
+    },
+    {
+      "home": "Parma",
+      "away": "Monza",
+      "kickoff": "2026-09-06T15:00",
+      "book": "aggregator snapshot",
+      "prices": {"home": 2.45, "draw": 3.10, "away": 3.15},
+      "model": {"home": 0.539, "draw": 0.272, "away": 0.189},
+      "result": "draw",
+      "score": "1-1"
+    },
+    {
+      "home": "Bologna",
+      "away": "Sassuolo",
+      "kickoff": "2026-09-06T18:00",
+      "book": "account holder's book",
+      "prices": {"home": 1.95, "draw": 3.60, "away": 4.00},
+      "model": {"home": 0.529, "draw": 0.276, "away": 0.195},
+      "result": "draw",
+      "score": "2-2"
+    },
+    {
+      "home": "Juventus",
+      "away": "Milan",
+      "kickoff": "2026-09-06T20:45",
+      "book": "aggregator snapshot",
+      "prices": {"home": 2.10, "draw": 3.25, "away": 3.55},
+      "model": {"home": 0.461, "draw": 0.297, "away": 0.241},
+      "result": "draw",
+      "score": "1-1"
+    }
+  ]
+}
