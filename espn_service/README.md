@@ -688,9 +688,30 @@ market ends up exactly where the model already was.
 **Monotone in the division, for both models independently.** In the top two
 divisions the slope is *negative*: where these models disagree with Pinnacle, the
 line moves slightly further away — the disagreement is worse than useless. In the
-bottom three it turns positive and strongly significant, rising as the division
-falls. Elo in the National League: the market travels about 6% of the way to where
-Elo already was.
+bottom three it turns positive and strongly significant.
+
+**These raw slopes are overstated, by an amount that varies by division.** The
+opening price sits in both the disagreement and the movement, so part of every
+slope is the anchor rather than the model. Swapping the forecasts between matches
+while each keeps its own opening and closing measures that part directly:
+
+| division | model | slope | anchor | **net** |
+|---|---|---|---|---|
+| League One | Dixon-Coles | +0.0153 | +0.0020 | **+0.0133** |
+| League Two | Dixon-Coles | +0.0217 | **+0.0132** | **+0.0085** |
+| League Two | Elo | +0.0366 | **+0.0178** | **+0.0188** |
+| National League | Dixon-Coles | +0.0249 | +0.0053 | **+0.0196** |
+| National League | Elo | +0.0590 | +0.0119 | **+0.0471** |
+
+In League Two between half and two thirds of the slope is the anchor. The
+negative slopes in the top two divisions are barely touched (their anchors sit
+near zero), so those stand as reported.
+
+**What survives and what does not.** Elo's gradient remains monotone net of the
+anchor (+0.0039 → +0.0188 → +0.0471). **Dixon-Coles's does not** — net, League
+Two (+0.0085) falls below League One (+0.0133), so the clean monotonicity claimed
+above holds for one model, not two. The finding is smaller and less tidy than it
+first read; it is not gone.
 
 So "less watched means more beatable" **is** visible — it just does not show up in
 how far a price moves, only in whether an outsider can say anything about where it

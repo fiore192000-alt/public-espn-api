@@ -107,13 +107,13 @@ class TestObservation:
 
 class TestAnticipation:
     def test_a_model_the_market_fully_ratifies_scores_a_slope_of_one(self):
-        fit = clv.fit_anticipation(market(1, 400, ratified=1.0))
+        fit = clv.fit_anticipation_against_null(market(1, 400, ratified=1.0))
 
         assert fit.slope == pytest.approx(1.0, abs=0.01)
         assert fit.anticipates_the_market
 
     def test_a_model_the_market_half_ratifies_scores_a_half(self):
-        fit = clv.fit_anticipation(market(2, 400, ratified=0.5, noise=0.005))
+        fit = clv.fit_anticipation_against_null(market(2, 400, ratified=0.5, noise=0.005))
 
         assert fit.slope == pytest.approx(0.5, abs=0.05)
         assert fit.anticipates_the_market
@@ -139,7 +139,7 @@ class TestAnticipation:
         assert fit.matches == 0
 
     def test_a_small_sample_cannot_establish_anticipation(self):
-        fit = clv.fit_anticipation(market(5, 20, ratified=1.0))
+        fit = clv.fit_anticipation_against_null(market(5, 20, ratified=1.0))
 
         assert fit.slope == pytest.approx(1.0, abs=0.01)
         assert not fit.anticipates_the_market
@@ -319,3 +319,114 @@ class TestMeasureClvCommand:
     def test_an_unknown_league_is_named_in_the_error(self, db):
         with pytest.raises(CommandError, match="No league with slug 'nowhere'"):
             call_command("measure_clv", "nowhere", stdout=StringIO())
+
+
+class TestAnchorNull:
+    """The opening price sits in both the disagreement and the movement.
+
+    A slope can therefore exist with no model in it at all. H-0001 is the case
+    where exactly this structure produced t = -15.65 out of nothing, cleared a
+    Bonferroni budget and beat an ordinary permutation null. These tests make the
+    class of error impossible to certify past.
+    """
+
+    def anchored(self, count: int = 400, *, wobble: float, ratified: float) -> list[Observation]:
+        """Openings that wobble and revert, with a model that knows nothing.
+
+        The model is pinned to a constant, so every scrap of correlation between
+        disagreement and movement comes from the shared opening.
+        """
+        rng = random.Random(11)
+        built = []
+        for index in range(count):
+            fair = rng.uniform(0.25, 0.55)
+            opening = fair + rng.gauss(0.0, wobble)
+            closing = opening + ratified * (fair - opening)
+            built.append(
+                observation(
+                    match=f"m{index}",
+                    model=0.40,
+                    opening=opening,
+                    closing=max(min(closing, 0.98), 0.02),
+                )
+            )
+        return built
+
+    def test_a_wobbling_anchor_alone_produces_a_slope(self):
+        """Nothing but a reverting opening, and the naive fit reports a signal."""
+        naive = clv.fit_anticipation(self.anchored(wobble=0.05, ratified=0.5))
+
+        assert abs(naive.slope) > 0.10
+        assert abs(naive.t_stat) > 5
+
+    def test_the_anchor_null_reproduces_that_slope(self):
+        fit = clv.fit_anticipation_against_null(self.anchored(wobble=0.05, ratified=0.5))
+
+        assert fit.null_slope == pytest.approx(fit.slope, abs=0.1)
+        assert not fit.anticipates_the_market
+
+    def test_an_ordinary_permutation_is_not_a_null_at_all(self):
+        """Shuffling whole observations only relabels the pairs.
+
+        Feature and target both travel with the donor, so the regression is
+        identical and merely reclustered — it certifies the bias as signal.
+        """
+        entries = self.anchored(wobble=0.05, ratified=0.5)
+        rng = random.Random(3)
+        whole = entries[:]
+        rng.shuffle(whole)
+        naive_null = clv.fit_anticipation(
+            [
+                Observation(
+                    match=own.match,
+                    selection=own.selection,
+                    model=donor.model,
+                    opening=donor.opening,
+                    closing=donor.closing,
+                    opening_price=donor.opening_price,
+                    closing_price=donor.closing_price,
+                    won=own.won,
+                )
+                for own, donor in zip(entries, whole, strict=True)
+            ]
+        )
+        anchored_null = clv.fit_anticipation(clv.anchor_permuted(entries))
+        real = clv.fit_anticipation(entries)
+
+        # The whole shuffle reproduces the real slope because nothing was broken.
+        assert naive_null.slope == pytest.approx(real.slope, abs=0.02)
+        # The anchor-preserving null reproduces it too, and for the right reason:
+        # the bias is all there is here.
+        assert anchored_null.slope == pytest.approx(real.slope, abs=0.05)
+
+    def test_a_real_signal_still_clears_its_own_anchor(self):
+        fit = clv.fit_anticipation_against_null(market(9, 600, ratified=0.8, noise=0.005))
+
+        assert fit.slope > 5 * abs(fit.null_slope)
+        assert fit.anticipates_the_market
+
+    def test_an_uncertified_fit_refuses_to_certify_itself(self):
+        fit = clv.fit_anticipation(market(1, 400, ratified=1.0))
+
+        assert fit.slope == pytest.approx(1.0, abs=0.01)
+        assert not fit.certified
+        assert not fit.anticipates_the_market
+
+    def test_the_permutation_keeps_each_match_its_own_prices(self):
+        entries = self.anchored(60, wobble=0.05, ratified=0.5)
+
+        permuted = clv.anchor_permuted(entries)
+
+        assert [e.opening for e in permuted] == [e.opening for e in entries]
+        assert [e.closing for e in permuted] == [e.closing for e in entries]
+        assert [e.match for e in permuted] == [e.match for e in entries]
+        # Only the disagreements moved, and they are the same multiset.
+        assert sorted(round(e.disagreement, 9) for e in permuted) == sorted(
+            round(e.disagreement, 9) for e in entries
+        )
+
+    def test_the_verdict_records_whether_the_null_ran(self):
+        payload = clv.fit_anticipation_against_null(market(1, 400, ratified=1.0)).to_dict()
+
+        assert payload["certified"] is True
+        assert payload["null_slope"] is not None

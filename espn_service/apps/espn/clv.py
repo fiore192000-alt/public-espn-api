@@ -32,12 +32,15 @@ signal.
 from __future__ import annotations
 
 import math
+import random
 from collections import defaultdict
 from dataclasses import dataclass
 
 # Below this many matches an anticipation slope is not worth quoting.
 MINIMUM_MATCHES = 200
 CONFIDENCE_Z = 1.96
+# Seed for the anchor-preserving null. Fixed so a verdict is reproducible.
+NULL_SEED = 20260907
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,10 @@ class Anticipation:
     stderr: float
     observations: int
     matches: int
+    # What the same fit returns when only the model is scrambled — see
+    # anchor_permuted. None means the null was never run, which is treated as
+    # "not certified" rather than "passed".
+    null_slope: float | None = None
 
     @property
     def t_stat(self) -> float:
@@ -92,8 +99,24 @@ class Anticipation:
 
     @property
     def anticipates_the_market(self) -> bool:
-        """Is the slope positive by more than the sample can explain away?"""
-        return self.matches >= MINIMUM_MATCHES and self.interval()[0] > 0
+        """Is the slope positive by more than the sample and the anchor explain?
+
+        Refuses to certify without a null. The opening price sits in both the
+        disagreement and the movement, so a slope can exist with no model in it
+        at all; a verdict reached without measuring that is not a verdict.
+        """
+        if self.null_slope is None:
+            return False
+        return (
+            self.matches >= MINIMUM_MATCHES
+            and self.interval()[0] > 0
+            and self.slope > self.null_slope
+        )
+
+    @property
+    def certified(self) -> bool:
+        """Has the null been run at all?"""
+        return self.null_slope is not None
 
     def to_dict(self) -> dict:
         low, high = self.interval()
@@ -104,6 +127,8 @@ class Anticipation:
             "interval": [round(low, 4), round(high, 4)],
             "observations": self.observations,
             "matches": self.matches,
+            "null_slope": round(self.null_slope, 4) if self.null_slope is not None else None,
+            "certified": self.certified,
             "anticipates_the_market": self.anticipates_the_market,
         }
 
@@ -132,6 +157,82 @@ def fit_anticipation(observations: list[Observation]) -> Anticipation:
         stderr=math.sqrt(meat) / xx if meat > 0 else 0.0,
         observations=len(observations),
         matches=len(per_match),
+    )
+
+
+def anchor_permuted(
+    observations: list[Observation],
+    seed: int = NULL_SEED,
+) -> list[Observation]:
+    """Give every match another match's disagreement, keeping its own prices.
+
+    The null that the ordinary permutation cannot provide. ``fit_anticipation``
+    regresses ``closing - opening`` on ``model - opening``: the opening price
+    sits in both, with the same sign, so whatever transient component it carries
+    contributes to the covariance whether or not the model knows anything.
+
+    Shuffling the whole observation would move the opening too and destroy that
+    contribution along with everything else, reporting a floor of zero and
+    certifying the bias as signal. Shuffling **only the disagreement** leaves each
+    match's own opening and closing in place, so the slope this returns is what
+    the shared anchor is worth on its own.
+
+    On this repository's data that floor is small — the models disagree with the
+    price far more than the price wobbles — but it is not something to assume.
+    H-0001 is the case where the same structure produced ``t = -15.65`` out of
+    nothing at all.
+    """
+    by_match: dict[str, list[Observation]] = defaultdict(list)
+    for observation in observations:
+        by_match[observation.match].append(observation)
+
+    matches = list(by_match)
+    donors = matches[:]
+    random.Random(seed).shuffle(donors)
+
+    permuted: list[Observation] = []
+    for match, donor in zip(matches, donors, strict=True):
+        lent = {entry.selection: entry for entry in by_match[donor]}
+        for own in by_match[match]:
+            source = lent.get(own.selection)
+            if source is None:
+                continue
+            permuted.append(
+                Observation(
+                    match=own.match,
+                    selection=own.selection,
+                    # The donor's forecast against THIS match's opening. The
+                    # opening therefore still sits in both the disagreement and
+                    # the movement, exactly as in the real fit — only the
+                    # forecast has been stripped of any knowledge of this match.
+                    model=source.model,
+                    opening=own.opening,
+                    closing=own.closing,
+                    opening_price=own.opening_price,
+                    closing_price=own.closing_price,
+                    won=own.won,
+                )
+            )
+    return permuted
+
+
+def fit_anticipation_against_null(
+    observations: list[Observation],
+    seed: int = NULL_SEED,
+) -> Anticipation:
+    """Fit the slope and the anchor's own contribution, in one object.
+
+    This is the only route to a positive verdict: ``anticipates_the_market``
+    refuses to certify an :class:`Anticipation` whose ``null_slope`` is unset.
+    """
+    fit = fit_anticipation(observations)
+    floor = fit_anticipation(anchor_permuted(observations, seed))
+    return Anticipation(
+        slope=fit.slope,
+        stderr=fit.stderr,
+        observations=fit.observations,
+        matches=fit.matches,
+        null_slope=floor.slope,
     )
 
 
@@ -235,7 +336,7 @@ class Report:
 def assess(name: str, observations: list[Observation], *, edge: float = 0.0) -> Report:
     return Report(
         name=name,
-        anticipation=fit_anticipation(observations),
+        anticipation=fit_anticipation_against_null(observations),
         closing_line=beat_the_close(observations, edge=edge),
         losses={
             source: log_loss(observations, source) for source in ("model", "opening", "closing")

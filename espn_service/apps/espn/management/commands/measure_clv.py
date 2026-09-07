@@ -101,17 +101,21 @@ class Command(BaseCommand):
         self.stdout.write("")
         self.stdout.write("  Anticipation: of the model's disagreement with the open,")
         self.stdout.write("  how much does the market itself go on to travel?")
-        self.stdout.write(f"  {'':16}{'slope':>9}{'stderr':>9}{'t':>8}   95% interval")
+        self.stdout.write(f"  {'':16}{'slope':>9}{'stderr':>9}{'t':>8}{'anchor':>10}{'net':>10}")
         for report in reports:
             a = report.anticipation
-            low, high = a.interval()
+            floor = a.null_slope if a.null_slope is not None else 0.0
             self.stdout.write(
                 f"  {report.name:16}{a.slope:>+9.4f}{a.stderr:>9.4f}{a.t_stat:>+8.2f}"
-                f"   [{low:+.4f}, {high:+.4f}]"
+                f"{floor:>+10.4f}{a.slope - floor:>+10.4f}"
             )
         self.stdout.write(
             "  Zero means the market never ratifies the disagreement. One would mean the\n"
-            "  market ends up exactly where the model already was."
+            "  market ends up exactly where the model already was.\n"
+            "  The anchor column is the same fit with the forecasts swapped between matches,\n"
+            "  each keeping its own opening and closing. The opening sits in both the\n"
+            "  disagreement and the movement, so that column is what the slope is worth with\n"
+            "  no model in it at all. Read the net column, not the slope."
         )
 
         self.stdout.write("")
