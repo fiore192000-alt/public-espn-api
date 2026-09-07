@@ -1,0 +1,82 @@
+{
+  "away": "Lazio",
+  "decision": "no bet",
+  "edge": {
+    "away": -0.0071,
+    "draw": -0.0228,
+    "home": 0.0299
+  },
+  "expected_goals": {
+    "dixon_coles": [
+      1.083,
+      1.045
+    ],
+    "xg_model": [
+      1.557,
+      1.455
+    ]
+  },
+  "expected_value": {
+    "away": -0.0747,
+    "draw": -0.1327,
+    "home": 0.0253
+  },
+  "fingerprint": "aa65c9da37acd879",
+  "frozen_at": "2026-09-07T18:12:27+00:00",
+  "history": {
+    "latest": "2026-08-31",
+    "matches": 8000
+  },
+  "home": "Udinese",
+  "kickoff": "2026-09-07T18:45:00Z",
+  "league": "ita.1",
+  "market_fair": {
+    "away": 0.363,
+    "draw": 0.3072,
+    "home": 0.3298
+  },
+  "model_average": {
+    "away": 0.3559,
+    "draw": 0.2844,
+    "home": 0.3597
+  },
+  "models": {
+    "club_elo": {
+      "away": 0.3806,
+      "draw": 0.3121,
+      "home": 0.3074
+    },
+    "dixon_coles": {
+      "away": 0.3535,
+      "draw": 0.2733,
+      "home": 0.3732
+    },
+    "elo": {
+      "away": 0.3329,
+      "draw": 0.31,
+      "home": 0.3571
+    },
+    "expected_goals": {
+      "away": 0.3566,
+      "draw": 0.2421,
+      "home": 0.4013
+    }
+  },
+  "prices_taken": {
+    "away": 2.6,
+    "draw": 3.05,
+    "home": 2.85
+  },
+  "ratings": {
+    "club_elo_away": 1751.23,
+    "club_elo_home": 1659.4,
+    "elo_away": 1679.2,
+    "elo_home": 1614.6
+  },
+  "to_be_filled_after": [
+    "closing_prices",
+    "result",
+    "clv"
+  ],
+  "why": "Best selection is home at +2.53% EV, below the 5% edge threshold the value rule requires. More decisively, H-0003 measures the model's disagreement with the price as a measure of the model being wrong, and the 'edge >= +3% on the home side' rule returned -7.2% (t = -3.31) over 3,004 Serie A matches."
+}
